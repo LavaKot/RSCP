@@ -116,6 +116,8 @@ fn compile_in_chain(
         top_names: Vec::new(),
         temp_n: 0,
         enums: HashMap::new(),
+        classes: HashMap::new(),
+        method_check: None,
         base_dir: base_dir.to_path_buf(),
         chain,
     };
@@ -138,14 +140,77 @@ struct Compiler {
     /// Patterns and exhaustiveness checks only see same-file enums —
     /// imports resolve at runtime (26.0.11.0).
     enums: HashMap<String, Vec<(String, usize)>>,
+    /// Classes declared so far (this file): name -> (parent, fields,
+    /// methods) — resolves `self.x` checks through the same-file chain
+    /// (26.0.12.6).
+    classes: HashMap<String, (Option<String>, Vec<String>, Vec<String>)>,
+    /// Active while compiling a method of a class that declared fields:
+    /// the compile-time `self.x` check (26.0.12.6).
+    method_check: Option<Rc<ClassCheck>>,
     /// Directory of the file being compiled; `import` paths resolve here.
     base_dir: PathBuf,
     /// Canonical paths of the files being compiled (cycle detection).
     chain: Vec<PathBuf>,
 }
 
+/// Compile-time `self.x` validation context for a class with declared
+/// fields (26.0.12.6). `strict` is false when a parent class could not be
+/// resolved in the same file — then the check steps aside rather than
+/// risk false positives on inherited members.
+struct ClassCheck {
+    name: String,
+    fields: Vec<String>,
+    methods: Vec<String>,
+    strict: bool,
+}
+
 impl Compiler {
     // ---- context helpers -------------------------------------------------
+
+    /// Compile-time `self.x` validation inside classes that declared
+    /// fields (26.0.12.6): reads accept fields and methods, writes only
+    /// fields. Skipped when the parent chain is not fully same-file
+    /// (`strict == false`) or the index is dynamic.
+    fn check_self_member(
+        &mut self,
+        obj: &Expr,
+        idx: &Expr,
+        write: bool,
+        line: usize,
+        col: usize,
+    ) -> Result<(), RscpError> {
+        let ck = match &self.method_check {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
+        if !ck.strict {
+            return Ok(());
+        }
+        if !matches!(&obj.kind, ExprKind::Ident(n) if n == "self") {
+            return Ok(());
+        }
+        let name = match &idx.kind {
+            ExprKind::Str(s) => s.clone(),
+            _ => return Ok(()), // dynamic index: the runtime decides
+        };
+        let ok = ck.fields.iter().any(|f| f == &name)
+            || (!write && ck.methods.iter().any(|m| m == &name));
+        if ok {
+            return Ok(());
+        }
+        let list = if ck.fields.is_empty() {
+            "none".to_string()
+        } else {
+            ck.fields.join(", ")
+        };
+        Err(self.err(format!(
+            "class '{}' has no {} '{}'; declared fields: {}",
+            ck.name,
+            if write { "field" } else { "field or method" },
+            name,
+            list
+        ), line, col))
+    }
 
     fn cur(&mut self) -> &mut FnCtx {
         self.fns.last_mut().unwrap()
@@ -458,14 +523,48 @@ impl Compiler {
                     }
                 }
             }
-            StmtKind::Class { name, parent, methods } => {
+            StmtKind::Class { name, parent, fields, methods } => {
                 // A class object is a plain map built right in bytecode:
                 //   {"__name__": <str>, "__isclass__": true,
-                //    "__parent__": <class map or null>, <method>: <closure>}
+                //    "__parent__": <class map or null>,
+                //    "__fields__": [names] (26.0.12.6), <method>: <closure>}
                 // Methods get `self` injected as parameter 0.
-                if 3 + methods.len() > u16::MAX as usize {
+                let extra = if fields.is_empty() { 0 } else { 1 };
+                if 3 + extra + methods.len() > u16::MAX as usize {
                     return Err(self.err("class has too many members", s.line, s.col));
                 }
+                // Resolve the same-file parent chain for `self.x` checks.
+                let mut check: Option<Rc<ClassCheck>> = None;
+                if !fields.is_empty() {
+                    let mut all_fields = fields.clone();
+                    let mut all_methods: Vec<String> =
+                        methods.iter().map(|(n, _)| n.clone()).collect();
+                    let mut strict = true;
+                    let mut pname = parent.clone();
+                    while let Some(p) = &pname {
+                        match self.classes.get(p) {
+                            Some((pp, pf, pm)) => {
+                                all_fields.extend(pf.iter().cloned());
+                                all_methods.extend(pm.iter().cloned());
+                                pname = pp.clone();
+                            }
+                            None => {
+                                strict = false;
+                                break;
+                            }
+                        }
+                    }
+                    check = Some(Rc::new(ClassCheck {
+                        name: name.clone(),
+                        fields: all_fields,
+                        methods: all_methods,
+                        strict,
+                    }));
+                }
+                self.classes.insert(
+                    name.clone(),
+                    (parent.clone(), fields.clone(), methods.iter().map(|(n, _)| n.clone()).collect()),
+                );
                 let k = self.string_const("__name__", s.line, s.col)?;
                 self.emit_u16(Op::Constant, k, s.line, s.col);
                 let v = self.string_const(name, s.line, s.col)?;
@@ -484,6 +583,17 @@ impl Compiler {
                         self.emit(Op::Null, s.line, s.col);
                     }
                 }
+                if !fields.is_empty() {
+                    let k = self.string_const("__fields__", s.line, s.col)?;
+                    self.emit_u16(Op::Constant, k, s.line, s.col);
+                    for f in fields {
+                        let fi = self.string_const(f, s.line, s.col)?;
+                        self.emit_u16(Op::Constant, fi, s.line, s.col);
+                    }
+                    self.emit_u16(Op::Array, fields.len() as u16, s.line, s.col);
+                }
+                let saved_check = self.method_check.take();
+                self.method_check = check;
                 for (mname, m) in methods {
                     let ki = self.string_const(mname, s.line, s.col)?;
                     self.emit_u16(Op::Constant, ki, s.line, s.col);
@@ -492,7 +602,8 @@ impl Compiler {
                     let ci = self.function(&lit, Some(mname))?;
                     self.emit_closure(ci, s.line, s.col)?;
                 }
-                self.emit_u16(Op::Map, (3 + methods.len()) as u16, s.line, s.col);
+                self.method_check = saved_check;
+                self.emit_u16(Op::Map, (3 + extra + methods.len()) as u16, s.line, s.col);
                 self.push_temp();
                 if self.at_top_level() {
                     if self.top_names.iter().any(|n| n == name) {
@@ -1095,6 +1206,7 @@ impl Compiler {
                 self.store_ident(name, *tl, *tc)?;
             }
             Target::Index { obj, idx } => {
+                self.check_self_member(obj, idx, true, line, col)?;
                 self.expr(obj)?;
                 self.expr(idx)?;
                 if let Some(bin) = binop {
@@ -1317,6 +1429,7 @@ impl Compiler {
                 self.push_temp(); // the result
             }
             ExprKind::Index { obj, idx } => {
+                self.check_self_member(obj, idx, false, e.line, e.col)?;
                 self.expr(obj)?;
                 self.expr(idx)?;
                 self.emit(Op::IndexGet, e.line, e.col);

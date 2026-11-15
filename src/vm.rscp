@@ -1374,12 +1374,29 @@ impl Vm {
     ) -> CallOutcome {
         let args: Vec<Value> = self.stack.drain(callee_pos + 1..).collect();
         self.stack.truncate(callee_pos);
-        let class = Value::Map(class_map);
-        let instance = Value::Map(Rc::new(RefCell::new(
-            [(Rc::from("__class__") as Rc<str>, class.clone())]
-                .into_iter()
-                .collect(),
-        )));
+        let class = Value::Map(Rc::clone(&class_map));
+        // Declared fields (26.0.12.6) start as null: a forgotten assignment
+        // reads as null instead of MISSING_KEY.
+        let field_names: Vec<Rc<str>> = {
+            let mref = class_map.borrow();
+            match mref.get("__fields__") {
+                Some(Value::Array(items)) => items
+                    .borrow()
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Str(s) => Some(Rc::clone(s)),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        let mut instance_map = crate::value::ValueMap::default();
+        instance_map.insert(Rc::from("__class__") as Rc<str>, class.clone());
+        for f in field_names {
+            instance_map.insert(f, Value::Null);
+        }
+        let instance = Value::Map(Rc::new(RefCell::new(instance_map)));
         match find_method(&class, "init") {
             Some(init) => {
                 if init.proto.arity as usize != args.len() + 1 {

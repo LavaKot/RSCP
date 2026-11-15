@@ -278,6 +278,7 @@ impl Parser {
         }
         self.advance(); // {
         let mut methods: Vec<(String, FuncLit)> = Vec::new();
+        let mut fields: Vec<String> = Vec::new();
         loop {
             if self.check(TokenType::RBrace) {
                 break;
@@ -288,7 +289,18 @@ impl Parser {
             if self.match_ty(TokenType::Semicolon).is_some() {
                 continue; // empty statement
             }
-            self.expect(TokenType::Fn, "'fn' (a class body holds only methods)")?;
+            if self.check(TokenType::Ident) {
+                // Field declaration (26.0.12.6): `kind, text, pos ;`
+                let f = self.advance();
+                let fname = f.lexeme.clone();
+                if fields.contains(&fname) || methods.iter().any(|(n, _)| *n == fname) {
+                    return Err(self.error_at(&f, format!("duplicate member '{fname}' in class '{}'", name.lexeme)));
+                }
+                fields.push(fname);
+                self.match_ty(TokenType::Comma); // `,` or newline both work
+                continue;
+            }
+            self.expect(TokenType::Fn, "'fn' or a field name (a class body holds methods and field declarations)")?;
             let mname = self.expect(TokenType::Ident, "a method name after 'fn'")?;
             if methods.iter().any(|(n, _)| n == &mname.lexeme) {
                 return Err(self.error_at(&mname, format!("duplicate method '{}'", mname.lexeme)));
@@ -298,7 +310,7 @@ impl Parser {
         }
         self.advance(); // }
         Ok(Stmt::new(
-            StmtKind::Class { name: name.lexeme.clone(), parent, methods },
+            StmtKind::Class { name: name.lexeme.clone(), parent, fields, methods },
             kw.line,
             kw.col,
         ))
@@ -2106,7 +2118,7 @@ fn f(
             "class Animal {\n    fn init(name) { self.name = name }\n    fn speak() -> \"...\"\n}\nclass Dog(Animal) { fn speak() -> \"Woof\" }",
         );
         match &stmts[0].kind {
-            StmtKind::Class { name, parent, methods } => {
+            StmtKind::Class { name, parent, fields, methods } => {
                 assert_eq!(name, "Animal");
                 assert!(parent.is_none());
                 assert_eq!(methods.len(), 2);

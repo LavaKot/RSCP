@@ -1,0 +1,6 @@
+class Token {
+    kind, text
+    fn init(kind) { self.kind = kind }
+    fn show() -> self.txt
+}
+println(Token(1).show())

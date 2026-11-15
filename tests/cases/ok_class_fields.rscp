@@ -1,0 +1,42 @@
+# Class field declarations (26.0.12.6): opt-in strictness.
+# `class Token { kind, text, pos ; fn init(...) }` — declared fields
+# null-init on construction, and self.<member> is checked at compile time.
+
+class Token {
+    kind, text, pos
+    fn init(kind, text, pos) {
+        self.kind = kind
+        self.text = text
+        self.pos = pos
+    }
+    fn show() -> f"{self.kind}({self.text})@{self.pos}"
+}
+
+var t = Token("num", "42", 3)
+println(t.show())
+println(t.kind, t.text, t.pos)
+
+# A forgotten assignment reads as null, not MISSING_KEY.
+class Lazy { name, value
+    fn init(name) { self.name = name }
+}
+var l = Lazy("x")
+println(l.name, l.value)
+
+# Inheritance: parent fields flow into the check.
+class Expr { kind
+    fn init(kind) { self.kind = kind }
+}
+class Bin(Expr) { lhs, rhs
+    fn init(lhs, rhs) {
+        super.init("bin")
+        self.lhs = lhs
+        self.rhs = rhs
+    }
+}
+var b = Bin(1, 2)
+println(b.kind, b.lhs, b.rhs, b instanceof Expr)
+
+# Old classes without declarations keep the old behavior.
+class Free { fn hi() -> "free" }
+println(Free().hi())

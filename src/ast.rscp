@@ -247,6 +247,9 @@ pub enum StmtKind {
     Class {
         name: String,
         parent: Option<String>,
+        /// Declared fields (26.0.12.6): `class Token { kind, text, pos ; ... }`.
+        /// Opt-in: empty keeps the old field-less behavior.
+        fields: Vec<String>,
         methods: Vec<(String, FuncLit)>,
     },
     /// `enum Shape { Circle, Rect(w, h) }` (26.0.11.0). Unit variants are

@@ -1,0 +1,4 @@
+class Token {
+    kind
+    fn init() { self.kindd = 1 }
+}
