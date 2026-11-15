@@ -1,0 +1,17 @@
+# The loop variable is a fresh binding each iteration (26.0.12.16):
+# closures created in different iterations must see different values.
+# The README promised this since 2026.2.0.0, but all closures used to
+# share one cell and see the last value.
+var fs = []
+for i in 0..3 { push(fs, || i) }
+println(fs[0](), fs[1](), fs[2]())
+
+fn mk() { var fs = []
+for i in 10..13 { push(fs, || i * 2) }
+return fs }
+var g = mk()
+println(g[0](), g[2]())
+
+var ws = []
+for x in [5, 6, 7] { push(ws, || x + 1) }
+println(ws[0](), ws[1](), ws[2]())

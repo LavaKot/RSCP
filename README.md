@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.15 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.16 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.15.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.16.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,7 +304,7 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So the current release is `26.0.12.3` (`v26.0.12.15`); a hotfix on top of
+So the current release is `26.0.12.3` (`v26.0.12.16`); a hotfix on top of
 it would be `26.0.12.4`, and the next feature release `26.0.13.0`. While
 the second number is `0`, GitHub releases are titled **"Beta …"** (e.g.
 "Beta 26.0.12.3"); from the first stable release the prefix disappears.
@@ -318,6 +318,14 @@ README.
 
 ## Changelog
 
+* **26.0.12.16** — `for x in …` really is "a fresh binding each
+  iteration", as the README has promised since 2026.2.0.0. Closures
+  created inside the loop used to share one cell and all saw the LAST
+  value (`for i in 0..3 { push(fs, || i) }` gave `2 2 2`); the loop head
+  now closes the loop variable's upvalue before each refresh (the Lua
+  technique), so each iteration's closures capture their own cell —
+  `0 1 2`. The loop variable stays loop-scoped and immutable as before.
+  Found by `scripts/recon9.py` (group C) with a wrong-result probe.
 * **26.0.12.15** — the REPL remembers enums and classes across lines.
   `enum E { A, B(x) }` on one line then `match E.B(5) { E.A => 0,
   E.B(x) => x }` on the next used to fail with "unknown enum 'E'

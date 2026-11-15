@@ -605,6 +605,7 @@ impl Vm {
                         };
                         if cont {
                             let v = self.stack[base + idx_slot].clone();
+                            self.close_upvalue_at(base + elem_slot);
                             self.stack[base + elem_slot] = v;
                         } else {
                             ip = t;
@@ -634,6 +635,7 @@ impl Vm {
                                 Ok(v) => v,
                                 Err(e) => rte!(op_ip, e),
                             };
+                            self.close_upvalue_at(base + elem_slot);
                             self.stack[base + elem_slot] = v;
                         } else {
                             ip = t;
@@ -1622,6 +1624,20 @@ impl Vm {
         let cell = Rc::new(RefCell::new(Upvalue::Open(slot)));
         self.open_upvalues.push((slot, Rc::clone(&cell)));
         cell
+    }
+
+    /// Close the open upvalue of exactly one stack slot, if any: the cell
+    /// takes ownership of the CURRENT value. Loop heads call this before
+    /// refreshing the loop variable so each iteration's closures capture a
+    /// fresh cell (26.0.12.16) — the promise "a fresh binding each
+    /// iteration" from README/ast was not kept: all closures used to see
+    /// the last value.
+    fn close_upvalue_at(&mut self, slot: usize) {
+        if let Some(i) = self.open_upvalues.iter().position(|(s, _)| *s == slot) {
+            let (_, cell) = self.open_upvalues.swap_remove(i);
+            let v = self.stack[slot].clone();
+            *cell.borrow_mut() = Upvalue::Closed(v);
+        }
     }
 
     /// Close every open upvalue pointing at or above `from`: the owning
