@@ -4,4 +4,4 @@ version = 4
 
 [[package]]
 name = "rscp"
-version = "2026.5.1"
+version = "2026.5.2"

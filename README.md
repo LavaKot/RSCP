@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.5.1.0 — enter statements, Ctrl-D to exit.
+rscp 2026.5.2.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.5.1.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.5.2.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -201,10 +201,12 @@ else if total >= 10 {         # 'else' may sit on its own line
 }
 ```
 
-The whole 2026.1.0.0 syntax still parses — semicolons, parentheses around
-conditions and C-style `for` loops keep working, and the two styles mix
-freely in one file. The C-style loop is the only form that still wants its
-parentheses (and its internal `;`); prefer ranges:
+Most of the 2026.1.0.0 syntax still parses — semicolons and C-style `for`
+loops keep working, and the two styles mix freely in one file. Since
+2026.5.2, though, parentheses around an `if`/`while` condition are a syntax
+error (the compiler points at them and suggests the plain form). The
+C-style loop is the only form that still wants its parentheses (and its
+internal `;`); prefer ranges:
 
 ```rust
 for (var i = 0; i < 10; i++) { ... }   # legacy, still works
@@ -266,7 +268,10 @@ is integer division, C style (`7 / 2` is `3`, `-7 / 2` is `-3`).
 ### Control flow
 
 Braces are **required** for `if`/`while`/`loop`/`for` bodies — no
-dangling-else bugs — but parentheses around conditions are not.
+dangling-else bugs — and conditions are written plain: `if x > 5 {`.
+Parentheses around the whole condition are a syntax error since 2026.5.2
+(parens that are part of a bigger expression, like `if (a + b) * c > 0 {`,
+still parse).
 
 ```rust
 if x < 10 { println("low") }
@@ -449,7 +454,10 @@ accidents. Like Python, `**` binds tighter than unary minus (`-2 ** 2` is
 (overflow is an error); anything else promotes to `float`. `==` compares
 numbers, strings, bools and `null` by value (`1 == 1.0` is `true`); arrays,
 maps and functions compare by identity. `&&`/`||` short-circuit and require
-bool operands; so do `if`/`while` conditions. Integer overflow and division
+bool operands; so do `if`/`while` conditions. The word forms `and`, `or`,
+`not` (since 2026.5.2) are exact synonyms of `&&`, `||`, `!` at the same
+precedence — note that `not` binds as tightly as `!`, so `not a == b`
+means `(not a) == b`, like Rust and unlike Python. Integer overflow and division
 by zero are runtime errors, not UB.
 
 ### Built-in functions
@@ -537,7 +545,7 @@ funcBody       := "(" [ paramList ] ")" ( block | "->" expression ) ;
 paramList      := IDENT { "," IDENT } [ "," ] ;   (* trailing comma ok *)
 
 ifStmt         := "if" expression block
-                  [ "else" ( ifStmt | block ) ] ;  (* '(' cond ')' also ok *)
+                  [ "else" ( ifStmt | block ) ] ;
 whileStmt      := "while" expression block ;
 loopStmt       := "loop" block ;
 forStmt        := "for" ( forHead ")" block                       (* legacy *)
@@ -562,8 +570,8 @@ exprStmt       := expression [";"] ;
 expression     := ternary ;
 ternary        := range [ "?" expression ":" ternary ] ;
 range          := logicOr [ ( ".." | "..=" ) logicOr ] ; (* for iterables only *)
-logicOr        := logicAnd { "||" logicAnd } ;
-logicAnd       := bitOr { "&&" bitOr } ;
+logicOr        := logicAnd { ( "||" | "or" ) logicAnd } ;
+logicAnd       := bitOr { ( "&&" | "and" ) bitOr } ;
 bitOr          := bitXor { "|" bitXor } ;
 bitXor         := bitAnd { "^" bitAnd } ;
 bitAnd         := equality { "&" equality } ;
@@ -572,7 +580,7 @@ comparison     := shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
 shift          := term { ( "<<" | ">>" ) term } ;
 term           := factor { ( "+" | "-" ) factor } ;
 factor         := unary { ( "*" | "/" | "%" ) unary } ;
-unary          := ( "!" | "-" | "~" ) unary | power ;
+unary          := ( "!" | "not" | "-" | "~" ) unary | power ;
 power          := postfix [ "**" unary ] ;   (* right-assoc, tighter than unary *)
 postfix        := primary { "(" [ arguments ] ")" | "[" expression "]" | "." IDENT } ;
 arguments      := expression { "," expression } [ "," ] ;
@@ -698,7 +706,7 @@ cargo test
 * **57 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **96 golden cases** in `tests/cases/`: each program's exact stdout is
+* **98 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
@@ -713,7 +721,7 @@ cargo test
 |---|---|---|---|
 | semicolons | none | required | optional (newline ends the statement) |
 | blocks | indentation | braces | braces (required) |
-| condition parens | no | no | no (optional, legacy form accepts them) |
+| condition parens | no | no | no (a syntax error since 2026.5.2) |
 | bindings | implicit | `let` / `let mut` | `let` / `var` |
 | functions | `def f(x):` | `fn f(x) { }` | `fn f(x) { }` or `fn f(x) -> expr` |
 | lambdas | `lambda x: x` | `\|x\| x` | `\|x\| x` |
@@ -743,13 +751,18 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.5.1` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.5.1.0`), release
+(`2026.5.2` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.5.2.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.5.2.0** — word logic and plain conditions. `and`, `or`, `not` are
+  exact word forms of `&&`, `||`, `!` (same precedence; `not` binds as
+  tightly as `!`). Parentheses around `if`/`while` conditions are now a
+  syntax error with a helpful message — write the condition plain:
+  `if x > 5 {`. 58 unit tests, 98 golden cases.
 * **2026.5.1.0** — Python-style comments. Line comments start with `#`;
   `//` and `/* */` are no longer comment syntax (division still uses `/`),
   and meeting one produces a clear migration hint pointing at `#`.

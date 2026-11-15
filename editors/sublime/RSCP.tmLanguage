@@ -171,7 +171,7 @@
         },
         {
           "name": "keyword.operator.logical.rscp",
-          "match": "&&|\\|\\||!"
+          "match": "&&|\\|\\||!|\\band\\b|\\bor\\b|\\bnot\\b"
         },
         {
           "name": "punctuation.definition.closure.rscp",

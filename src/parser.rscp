@@ -333,9 +333,26 @@ impl Parser {
         Ok(Stmt::new(StmtKind::While { cond, body }, kw.line, kw.col))
     }
 
-    /// The condition of `if`/`while`: any expression, with or without
-    /// parentheses (the `{` of the body must stay on the same line).
+    /// The condition of `if`/`while`: any expression, written plain.
+    /// Parentheses around the whole condition are a syntax error since
+    /// 2026.5.2 (`if x > 5 {`, never `if (x > 5) {`).
     fn condition(&mut self, kw: &str) -> PResult<Expr> {
+        if self.peek_ty() == TokenType::LParen {
+            // Only flag `(cond) {` — parens that are part of a larger
+            // expression (`if (a + b) * c > 0 {`) must keep working.
+            if let Some(close) = self.find_matching_paren() {
+                let after = self.tokens[(close + 1).min(self.tokens.len() - 1)].ty;
+                if matches!(after, TokenType::LBrace | TokenType::Semicolon | TokenType::Eof) {
+                    let open = self.peek().clone();
+                    return Err(self.error_at(
+                        &open,
+                        format!(
+                            "parentheses around the '{kw}' condition are not allowed (since 2026.5.2) — write it plain: {kw} x > 5 {{ ... }}"
+                        ),
+                    ));
+                }
+            }
+        }
         let cond = self.expression()?;
         if !self.check(TokenType::LBrace) {
             return Err(self.error_here(format!(
@@ -343,6 +360,28 @@ impl Parser {
             )));
         }
         Ok(cond)
+    }
+
+    /// Index of the `)` matching the `(` at the cursor, or None when the
+    /// parens never close before end of input.
+    fn find_matching_paren(&self) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut i = self.pos;
+        loop {
+            let t = &self.tokens[i.min(self.tokens.len() - 1)];
+            match t.ty {
+                TokenType::LParen => depth += 1,
+                TokenType::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                TokenType::Eof => return None,
+                _ => {}
+            }
+            i += 1;
+        }
     }
 
     fn for_statement(&mut self) -> PResult<Stmt> {
@@ -719,7 +758,8 @@ impl Parser {
 
     fn logic_or(&mut self) -> PResult<Expr> {
         let mut lhs = self.logic_and()?;
-        while let Some(op) = self.match_ty(TokenType::OrOr) {
+        while matches!(self.peek_ty(), TokenType::OrOr | TokenType::Or) {
+            let op = self.advance();
             let rhs = self.logic_and()?;
             lhs = Expr::new(
                 ExprKind::Logical {
@@ -736,7 +776,8 @@ impl Parser {
 
     fn logic_and(&mut self) -> PResult<Expr> {
         let mut lhs = self.equality()?;
-        while let Some(op) = self.match_ty(TokenType::AndAnd) {
+        while matches!(self.peek_ty(), TokenType::AndAnd | TokenType::And) {
+            let op = self.advance();
             let rhs = self.equality()?;
             lhs = Expr::new(
                 ExprKind::Logical {
@@ -895,7 +936,7 @@ impl Parser {
 
     fn unary(&mut self) -> PResult<Expr> {
         let op = match self.peek_ty() {
-            TokenType::Not => Some(UnaryOp::Not),
+            TokenType::Not | TokenType::NotWord => Some(UnaryOp::Not),
             TokenType::Minus => Some(UnaryOp::Neg),
             TokenType::Tilde => Some(UnaryOp::BitNot),
             _ => None,
@@ -1335,8 +1376,8 @@ mod tests {
     #[test]
     fn control_flow_shapes() {
         let stmts = parse(
-            "if (a) { } else if (b) { } else { }\
-             while (x < 3) { x++; }\
+            "if a { } else if b { } else { }\
+             while x < 3 { x++; }\
              for (let i = 0; i < 3; i++) { }\
              for (let v in arr) { }",
         );
@@ -1640,5 +1681,30 @@ fn f(
         assert!(matches!(&e, RscpError::Parse { msg, .. } if msg.contains("line comments start with '#'")));
         let e = parse_err("1 /* block */ 2");
         assert!(matches!(&e, RscpError::Parse { msg, .. } if msg.contains("block comments")));
+        // Parenthesized conditions are rejected since 2026.5.2...
+        let e = parse_err("if (x < 5) { x++ }");
+        assert!(matches!(&e, RscpError::Parse { msg, .. } if msg.contains("parentheses around the 'if' condition")));
+        assert!(matches!(parse_err("while (true) { }"), RscpError::Parse { .. }));
+        // ...but parens that are part of the expression still parse.
+        assert_eq!(parse("if (a + b) * c > 0 { }").len(), 1);
+    }
+
+    #[test]
+    fn word_logic_operators() {
+        // 'and'/'or'/'not' are word forms of && / || / ! (2026.5.2).
+        let stmts = parse("let x = a and b or not c\nlet y = a && b || !c");
+        for i in 0..2 {
+            match &stmts[i].kind {
+                StmtKind::Let { init, .. } => assert!(
+                    matches!(&init.kind, ExprKind::Logical { op: LogicalOp::Or, ref lhs, .. }
+                        if matches!(lhs.kind, ExprKind::Logical { op: LogicalOp::And, .. })),
+                    "stmt {i}"
+                ),
+                other => panic!("bad stmt {i}: {other:?}"),
+            }
+        }
+        let stmts = parse("if not done { break }");
+        assert!(matches!(&stmts[0].kind, StmtKind::If { cond, .. }
+            if matches!(cond.kind, ExprKind::Unary { op: UnaryOp::Not, .. })));
     }
 }

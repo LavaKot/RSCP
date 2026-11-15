@@ -1,0 +1,11 @@
+# 'and' / 'or' / 'not' are word forms of && / || / ! (2026.5.2)
+let a = true
+let b = false
+println(a and b, a or b, not b)
+println(a && b, a || b, !b)
+var i = 0
+while i < 3 and not (i == 1) {
+    println("i =", i)
+    i++
+}
+println(not true == false)

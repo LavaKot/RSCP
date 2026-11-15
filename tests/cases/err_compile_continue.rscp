@@ -1,1 +1,1 @@
-while (true) { fn inner() { continue; } }
+while true { fn inner() { continue; } }

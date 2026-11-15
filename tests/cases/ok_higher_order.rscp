@@ -6,7 +6,7 @@ fn map(arr, f) {
 }
 fn filter(arr, pred) {
     var out = [];
-    for (let x in arr) { if (pred(x)) { push(out, x); } }
+    for (let x in arr) { if pred(x) { push(out, x); } }
     return out;
 }
 fn reduce(arr, init, f) {

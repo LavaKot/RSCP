@@ -1058,7 +1058,7 @@ mod tests {
     fn loops_and_break() {
         let vm = run(
             "var s = 0;\
-             for (var i = 0; i < 10; i++) { if (i == 5) { break; } s += i; }\
+             for (var i = 0; i < 10; i++) { if i == 5 { break; } s += i; }\
              var t = 0; for (let v in [10, 20, 30]) { t += v; }",
         )
         .unwrap();
@@ -1082,7 +1082,7 @@ mod tests {
             ("var x = nope;", "undefined variable 'nope'"),
             ("let x = 1 + true;", "unsupported operand types"),
             ("var f = 5; f();", "only functions can be called"),
-            ("if (1) { }", "expected a bool"),
+            ("if 1 { }", "expected a bool"),
             ("let x = 1; x = 2;", "immutable"),
             ("fn f() { return g(); } fn g() { return f(); } f();", "stack overflow"),
         ];

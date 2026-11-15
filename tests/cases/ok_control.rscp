@@ -1,19 +1,19 @@
 var x = 7;
-if (x < 5) { println("low"); }
-else if (x < 10) { println("mid"); }
+if x < 5 { println("low"); }
+else if x < 10 { println("mid"); }
 else { println("high"); }
 println(x > 5 ? "big" : "small");
 
 var i = 0;
-while (true) {
+while true {
     i++;
-    if (i >= 3) { break; }
+    if i >= 3 { break; }
 }
 println(i);
 
 var sum = 0;
 for (var j = 1; j <= 10; j++) {
-    if (j % 2 == 0) { continue; }
+    if j % 2 == 0 { continue; }
     sum += j;
 }
 println(sum);
@@ -21,11 +21,11 @@ println(sum);
 for (var a = 0; a < 3; a++) {
     var line = "";
     for (var b = 0; b < 3; b++) {
-        if (b == a) { line += "*"; } else { line += "."; }
+        if b == a { line += "*"; } else { line += "."; }
     }
     println(line);
 }
 
 var n = 0;
-for (;;) { n++; if (n == 5) { break; } }
+for (;;) { n++; if n == 5 { break; } }
 println(n);

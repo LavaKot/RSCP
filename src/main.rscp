@@ -30,7 +30,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "2026.5.1.0";
+const VERSION: &str = "2026.5.2.0";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -51,6 +51,7 @@ LANGUAGE (light syntax):
     var total = 0             # no ';' needed at line ends
     for i in 0..10 { ... }    # ranges, no parentheses
     if total > 5 { ... }      # braces required, no parens
+    if ok and not done { ... }  # word logic: and or not
     loop { break }            # infinite loop
     let double = |x| x * 2    # short closures
     fn square(x) -> x * x     # arrow function body

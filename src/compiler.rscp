@@ -1450,7 +1450,7 @@ mod tests {
 
     #[test]
     fn loop_jumps() {
-        let proto = compile_src("var i = 0; while (i < 3) { i++; }");
+        let proto = compile_src("var i = 0; while i < 3 { i++; }");
         let ops = &proto.chunk.code;
         assert!(ops.contains(&(Op::Loop as u8)));
         assert!(ops.contains(&(Op::JumpIfFalsePeek as u8)));

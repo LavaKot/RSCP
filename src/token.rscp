@@ -108,6 +108,10 @@ pub enum TokenType {
     AndAnd,
     OrOr,
     Not,
+    // Word forms of the logical operators (since 2026.5.2): and, or, not
+    And,
+    Or,
+    NotWord,
     // End of input
     Eof,
     /// Internal: a lexical error carried out of scanners that cannot fail
@@ -196,6 +200,9 @@ impl TokenType {
             AndAnd => "'&&'",
             OrOr => "'||'",
             Not => "'!'",
+            And => "'and'",
+            Or => "'or'",
+            NotWord => "'not'",
             Eof => "end of input",
             Error => "an invalid token",
         };
@@ -238,6 +245,9 @@ pub fn keyword(ident: &str) -> Option<TokenType> {
         "return" => Return,
         "break" => Break,
         "continue" => Continue,
+        "and" => And,
+        "or" => Or,
+        "not" => NotWord,
         _ => return None,
     })
 }
