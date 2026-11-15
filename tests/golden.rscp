@@ -61,7 +61,12 @@ fn golden_cases() {
 
         if out_path.exists() {
             checked += 1;
-            let expected = fs::read_to_string(&out_path).unwrap();
+            // Normalize CRLF: a git checkout on Windows (core.autocrlf) gives
+            // the expectation files \r\n line endings, while program output
+            // is always plain \n.
+            let expected = fs::read_to_string(&out_path)
+                .unwrap()
+                .replace("\r\n", "\n");
             if code != 0 {
                 failures.push(format!(
                     "{name}: expected exit 0, got {code}; stderr:\n{stderr}"

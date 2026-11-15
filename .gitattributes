@@ -1,0 +1,5 @@
+# Normalize the repo to LF so the golden tests (and the lexer) always see
+# the same bytes on every platform. Batch files are the exception: cmd.exe
+# is happiest with CRLF, so force it there (release zips also convert).
+* text=auto eol=lf
+*.bat text eol=crlf
