@@ -1,16 +1,16 @@
-// import: run a module once, use its exports through dot access.
-// Exports are a snapshot of the module's top-level bindings; state works
-// through closures (upvalues) and shared arrays/maps.
+# import: run a module once, use its exports through dot access.
+# Exports are a snapshot of the module's top-level bindings; state works
+# through closures (upvalues) and shared arrays/maps.
 import "_mod_util.rscp"
 println(_mod_util.double(21), _mod_util.golden)
 import "_mod_util.rscp" as u
 println(u.shout("hi"), u.ticks(), u.ticks())
 
-// Diamond import: the module body ran once (the closure keeps counting).
+# Diamond import: the module body ran once (the closure keeps counting).
 import "_mod_util.rscp" as again
 println(again.ticks())
 
-// Dot access is sugar for ["key"] — works on any map, reads and writes.
+# Dot access is sugar for ["key"] — works on any map, reads and writes.
 var cfg = {"host": "localhost", "port": 8080}
 println(cfg.host, cfg.port)
 cfg.port = 9090

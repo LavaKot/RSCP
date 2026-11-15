@@ -1,4 +1,4 @@
-// Bitwise operators, shifts and complement; 0b/0o/0x literals.
+# Bitwise operators, shifts and complement; 0b/0o/0x literals.
 let mask = 0b1100 & 0xA
 let flags = 0x0F | 0b100000
 let flip = 0xFF ^ 0x0F

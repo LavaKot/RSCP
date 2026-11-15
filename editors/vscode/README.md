@@ -1,6 +1,6 @@
 # RSCP для VS Code
 
-Официальное расширение языка RSCP 2026.5.0.0: подсветка синтаксиса (включая новые
+Официальное расширение языка RSCP 2026.5.1.0: подсветка синтаксиса (включая новые
 диапазоны `0..n`, короткие замыкания `|x| x` и стрелочные функции `->`),
 сниппеты, автозакрытие скобок и кавычек, комментарии по `Ctrl+/`, автосдвиг
 от `{ }`. Работает в VS Code, VSCodium, Cursor и других редакторах на базе
@@ -8,15 +8,15 @@ VS Code.
 
 ## Установка — способ 1, готовый пакет `.vsix` (рекомендуется)
 
-В дистрибутиве уже лежит собранный пакет `rscp-2026.5.0.0.vsix` (рядом с этим
+В дистрибутиве уже лежит собранный пакет `rscp-2026.5.1.0.vsix` (рядом с этим
 файлом). Установите его одной командой:
 
 ```sh
-code --install-extension rscp-2026.5.0.0.vsix
+code --install-extension rscp-2026.5.1.0.vsix
 ```
 
-- **VSCodium:** `codium --install-extension rscp-2026.5.0.0.vsix`
-- **Cursor:** `cursor --install-extension rscp-2026.5.0.0.vsix`
+- **VSCodium:** `codium --install-extension rscp-2026.5.1.0.vsix`
+- **Cursor:** `cursor --install-extension rscp-2026.5.1.0.vsix`
 - **Через интерфейс:** Extensions (`Ctrl+Shift+X`) → `…` → *Install from
   VSIX…* → выбрать файл.
 
@@ -26,8 +26,8 @@ code --install-extension rscp-2026.5.0.0.vsix
 ## Установка — способ 2, вручную из папки
 
 1. Скопируйте папку `editors/vscode` целиком в
-   `%USERPROFILE%\.vscode\extensions\rscp-2026.5.0.0`
-   (Linux/macOS: `~/.vscode/extensions/rscp-2026.5.0.0`).
+   `%USERPROFILE%\.vscode\extensions\rscp-2026.5.1.0`
+   (Linux/macOS: `~/.vscode/extensions/rscp-2026.5.1.0`).
 2. Перезапустите VS Code.
 
 ## Установка — способ 3, без расширения (одна строка настроек)
@@ -93,7 +93,7 @@ RSCP похож на Rust по ключевым словам, поэтому к�
 | константы | `true false null` |
 | числа | `42 3.14 0xFF 1_000 1e-3` |
 | строки | `"hi\n"` с экранированием |
-| комментарии | `//` и `/* */` |
+| комментарии | `#` до конца строки; TODO/FIXME/NOTE/HACK/XXX выделяются |
 | встроенные функции | `println len push keys ...` (перед `(`) |
 | свои функции | `fn makeCounter`, вызовы `makeCounter()` |
 | диапазоны | `0..10`, `0..=9` |

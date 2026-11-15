@@ -1,3 +1,3 @@
-// A binding cannot be combined with '|'.
+# A binding cannot be combined with '|'.
 let x = match 1 { 1 | n => n, else => 0 }
 println(x)

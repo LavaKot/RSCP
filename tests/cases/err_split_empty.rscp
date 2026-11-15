@@ -1,3 +1,3 @@
-// split() rejects an empty separator.
+# split() rejects an empty separator.
 let parts = split("abc", "")
 println(parts)

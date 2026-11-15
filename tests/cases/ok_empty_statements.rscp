@@ -1,4 +1,4 @@
-// Empty statements (explicit or inserted) are simply skipped.
+# Empty statements (explicit or inserted) are simply skipped.
 ;;let a = 1;;
 let b = 2
 ;

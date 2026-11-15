@@ -1,4 +1,4 @@
-// Nested closures and ranges in functions, heavy light-syntax nesting.
+# Nested closures and ranges in functions, heavy light-syntax nesting.
 fn makeCounter() -> || 0
 fn adder(a) -> |b| |c| a + b + c
 println(adder(1)(2)(3))

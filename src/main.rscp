@@ -30,7 +30,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "2026.5.0.0";
+const VERSION: &str = "2026.5.1.0";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -47,23 +47,24 @@ USAGE:
     rscp help                 show this help
 
 LANGUAGE (light syntax):
-    var total = 0             // no ';' needed at line ends
-    for i in 0..10 { ... }    // ranges, no parentheses
-    if total > 5 { ... }      // braces required, no parens
-    loop { break }            // infinite loop
-    let double = |x| x * 2    // short closures
-    fn square(x) -> x * x     // arrow function body
-    let s = match n {         // match expression with patterns
+    # comments run from '#' to the end of the line
+    var total = 0             # no ';' needed at line ends
+    for i in 0..10 { ... }    # ranges, no parentheses
+    if total > 5 { ... }      # braces required, no parens
+    loop { break }            # infinite loop
+    let double = |x| x * 2    # short closures
+    fn square(x) -> x * x     # arrow function body
+    let s = match n {         # match expression with patterns
         0 => \"zero\", 1 | 2 => \"few\",
         k if k < 0 => \"neg\", 3..=9 => \"digit\", else => \"other\"
     }
-    let flags = 0b1010 | 0xF0 // bitwise & | ^ ~ << >>, 0x/0b/0o literals
-    let area = 2 ** 10        // power: exact int, right-associative
-    let msg = f\"n={n}, sq={n ** 2}\"   // f-string interpolation
-    try { risky() } catch e { println(e) }   // catch runtime errors
-    throw \"boom\"                      // ...and raise your own
-    import \"math.rscp\" as math         // modules: math.double(2)
-    println(cfg.host)                  // dot access = cfg[\"host\"]
+    let flags = 0b1010 | 0xF0 # bitwise & | ^ ~ << >>, 0x/0b/0o literals
+    let area = 2 ** 10        # power: exact int, right-associative
+    let msg = f\"n={n}, sq={n ** 2}\"   # f-string interpolation
+    try { risky() } catch e { println(e) }   # catch runtime errors
+    throw \"boom\"                      # ...and raise your own
+    import \"math.rscp\" as math         # modules: math.double(2)
+    println(cfg.host)                  # dot access = cfg[\"host\"]
 
 BUILT-INS:
     print println len str int float type abs min max sqrt pow rand clock

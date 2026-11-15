@@ -1,4 +1,4 @@
-// Bubble sort with an early exit, plus a binary search over the result.
+# Bubble sort with an early exit, plus a binary search over the result.
 fn bubbleSort(arr) {
     var n = len(arr)
     for i in 0..n {
@@ -11,7 +11,7 @@ fn bubbleSort(arr) {
                 swapped = true
             }
         }
-        if !swapped { break }   // already sorted
+        if !swapped { break }   # already sorted
     }
     return arr
 }

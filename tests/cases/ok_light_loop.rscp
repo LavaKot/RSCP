@@ -1,4 +1,4 @@
-// `loop` is the Rust infinite loop; `while` needs no parentheses either.
+# `loop` is the Rust infinite loop; `while` needs no parentheses either.
 var i = 0
 loop {
     i++

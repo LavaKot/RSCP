@@ -1,0 +1,5 @@
+# '|' and '&' also work on two bools (since 2026.3.0.0).
+let a = true
+let b = a | true
+println(b)
+println(false | true, false | false, true & false, true & true)

@@ -1,5 +1,5 @@
-// try/catch/throw: catching runtime errors, unnamed catch, rethrowing,
-// returns and loop jumps out of try bodies, closures over the catch binding.
+# try/catch/throw: catching runtime errors, unnamed catch, rethrowing,
+# returns and loop jumps out of try bodies, closures over the catch binding.
 var log = []
 fn risky(n) -> 100 / n
 
@@ -8,16 +8,16 @@ try { throw "custom" } catch e { push(log, e) }
 try { let arr = [1] ; println(arr[9]) } catch e { push(log, slice(e, 0, 5)) }
 try { println("fine") } catch { push(log, "unreached") }
 
-// Errors unwind through function calls into the caller's try.
+# Errors unwind through function calls into the caller's try.
 fn wrapper() { try { return risky(0) } catch e { return "wrapped: " + e } }
 push(log, wrapper())
 
-// Nested try with a rethrow.
+# Nested try with a rethrow.
 try {
     try { throw "inner" } catch e { throw "outer saw " + e }
 } catch e2 { push(log, e2) }
 
-// break and continue leave try bodies cleanly.
+# break and continue leave try bodies cleanly.
 var seen = []
 for i in 0..5 {
     try {
@@ -28,7 +28,7 @@ for i in 0..5 {
 }
 push(log, seen)
 
-// The catch binding is an ordinary local; closures can capture it.
+# The catch binding is an ordinary local; closures can capture it.
 var saved = ""
 try { panic("captured") } catch msg { saved = |m| upper(m) }
 push(log, saved("x"))

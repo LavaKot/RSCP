@@ -1,4 +1,4 @@
-// An uncaught throw exits with code 70 and a stack trace.
+# An uncaught throw exits with code 70 and a stack trace.
 fn clean_up() { println("nope") }
 throw "boom from " + "the script"
 println("unreachable")

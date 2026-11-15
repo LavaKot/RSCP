@@ -1,5 +1,5 @@
-// A binding names the matched value; a block body's last expression is
-// the arm's value. match works inside loops and larger expressions.
+# A binding names the matched value; a block body's last expression is
+# the arm's value. match works inside loops and larger expressions.
 let x = match 5 {
     0..5 => "low",
     n => {

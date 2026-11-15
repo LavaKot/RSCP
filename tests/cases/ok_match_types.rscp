@@ -1,4 +1,4 @@
-// match works on strings, bools and null, and as a statement.
+# match works on strings, bools and null, and as a statement.
 var out = ""
 match "b" { "a" => { out = "A" }, "b" => { out = "B" }, else => { out = "?" } }
 println(out)

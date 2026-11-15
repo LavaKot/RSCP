@@ -1,14 +1,14 @@
-// Modules: import once, use everywhere. State travels in closures and
-// shared reference values (see the README's modules section).
+# Modules: import once, use everywhere. State travels in closures and
+# shared reference values (see the README's modules section).
 import "_math.rscp" as math
 
 println(math.double(21), math.golden)
 println(math.shout("modules"))
 
-// A closure exported by the module keeps its own state (shared upvalue).
+# A closure exported by the module keeps its own state (shared upvalue).
 println(math.ticks(), math.ticks(), math.ticks())
 
-// Dot access works on every map: reads, writes and new keys.
+# Dot access works on every map: reads, writes and new keys.
 var server = {"host": "localhost", "port": 8080}
 server.port = int(server.port) + 1000
 server.debug = true

@@ -1,5 +1,5 @@
-// The traditional first program, in RSCP 0.2.0.
-// Run it with:  rscp hello.rscp
+# The traditional first program, in RSCP 0.2.0.
+# Run it with:  rscp hello.rscp
 println("Hello, RSCP!")
 println("Light like Python, shaped like Rust — semicolons optional,")
 println("ranges, short closures and arrow functions, on a bytecode VM written in Rust.")

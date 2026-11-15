@@ -10,10 +10,10 @@ annotations. Under the hood it is still a bytecode compiler and a stack
 virtual machine with zero external dependencies.
 
 ```rust
-// The traditional first program.
+# The traditional first program.
 println("Hello, RSCP!")
 
-// FizzBuzz, the 2026.2.0.0 way — no ';' anywhere.
+# FizzBuzz, the 2026.2.0.0 way — no ';' anywhere.
 for i in 1..=30 {
     if i % 15 == 0      { println("FizzBuzz") }
     else if i % 3 == 0  { println("Fizz") }
@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.5.0.0 — enter statements, Ctrl-D to exit.
+rscp 2026.5.1.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.5.0.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.5.1.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -129,18 +129,20 @@ cargo build --release              # -> target\release\rscp.exe
 
 Semicolons are **optional**: a newline after a complete expression ends the
 statement (Go-style automatic semicolon insertion). Trailing commas in
-multiline literals are welcome.
+multiline literals are welcome. Comments run from `#` to the end of the
+line, Python style — `//` and `/* */` are no longer comment syntax, and
+the compiler prints a migration hint when it meets them.
 
 ```rust
 var total = 0
-for i in 0..10 {                  // exclusive range: 0..9
+for i in 0..10 {                  # exclusive range: 0..9
     if i % 2 == 0 { continue }
     total += i
 }
-for i in 1..=5 { total += i }     // inclusive range: 1..5
+for i in 1..=5 { total += i }     # inclusive range: 1..5
 
-while total > 5 { total -= 5 }    // no parentheses around conditions
-loop {                            // the Rust infinite loop
+while total > 5 { total -= 5 }    # no parentheses around conditions
+loop {                            # the Rust infinite loop
     if total == 0 { break }
     total--
 }
@@ -149,9 +151,9 @@ loop {                            // the Rust infinite loop
 Functions come in two weights:
 
 ```rust
-fn fib(n) -> n < 2 ? n : fib(n - 1) + fib(n - 2)   // arrow body: implicit return
+fn fib(n) -> n < 2 ? n : fib(n - 1) + fib(n - 2)   # arrow body: implicit return
 
-fn fibIter(n) {                                    // block body: explicit return
+fn fibIter(n) {                                    # block body: explicit return
     var a = 0
     var b = 1
     for _step in 0..n {
@@ -170,12 +172,12 @@ the Rust style:
 let double = |x| x * 2
 let add = |a, b| a + b
 let constant = || 42
-let withBlock = |x| {              // a block body needs an explicit return
+let withBlock = |x| {              # a block body needs an explicit return
     var t = x + 1
     return t * 10
 }
 fn applyTwice(f, x) -> f(f(x))
-println(applyTwice(|n| n * 3, 7))  // 63
+println(applyTwice(|n| n * 3, 7))  # 63
 ```
 
 Continuation rules are the same as in Go: a line that ends with an operator
@@ -183,18 +185,18 @@ or a comma continues; a line that ends with a complete value ends the
 statement. `{` stays on the same line as the condition it belongs to:
 
 ```rust
-var a = [                     // trailing commas are fine
+var a = [                     # trailing commas are fine
     10,
     20,
 ]
-var s = 1 +                   // '+' at the end: the next line continues
+var s = 1 +                   # '+' at the end: the next line continues
     2 +
     4
 var grade = "F"
-if total >= 100 {             // '{' on the condition's line
+if total >= 100 {             # '{' on the condition's line
     grade = "A"
 }
-else if total >= 10 {         // 'else' may sit on its own line
+else if total >= 10 {         # 'else' may sit on its own line
     grade = "B"
 }
 ```
@@ -205,8 +207,8 @@ freely in one file. The C-style loop is the only form that still wants its
 parentheses (and its internal `;`); prefer ranges:
 
 ```rust
-for (var i = 0; i < 10; i++) { ... }   // legacy, still works
-for i in 0..10 { ... }                 // the 2026.2.0.0 way
+for (var i = 0; i < 10; i++) { ... }   # legacy, still works
+for i in 0..10 { ... }                 # the 2026.2.0.0 way
 ```
 
 ### Variables: `let` vs `var`
@@ -215,10 +217,10 @@ for i in 0..10 { ... }                 // the 2026.2.0.0 way
 variable must be initialized — there are no uninitialized reads in RSCP.
 
 ```rust
-let answer = 42                // cannot be reassigned
-var count = 0                  // can
-count += 1                     // += -= *= /= %=
-count++                        // ++ -- (statement forms)
+let answer = 42                # cannot be reassigned
+var count = 0                  # can
+count += 1                     # += -= *= /= %=
+count++                        # ++ -- (statement forms)
 ```
 
 At the top level, a `let`/`var`/`fn` name may be declared only once; inside
@@ -227,10 +229,10 @@ a scope, names can shadow outer ones:
 ```rust
 var x = 1
 {
-    let x = 2                  // shadows the outer x
-    println(x)                 // 2
+    let x = 2                  # shadows the outer x
+    println(x)                 # 2
 }
-println(x)                     // 1
+println(x)                     # 1
 ```
 
 Assigning to a `let` is a compile-time error for locals, and a runtime error
@@ -273,13 +275,13 @@ else { println("high") }
 
 while n > 0 { n-- }
 
-loop { break }                            // infinite loop
+loop { break }                            # infinite loop
 
-for i in 0..10 { ... }                    // exclusive range
-for i in 0..=9 { ... }                    // inclusive range
-for v in [10, 20, 30] { println(v) }      // iterate array elements
-for k in keys(mapVar) { println(k, mapVar[k]) }  // map keys, sorted
-for var i in 0..3 { i = i * 10 }          // `var` makes the loop variable assignable
+for i in 0..10 { ... }                    # exclusive range
+for i in 0..=9 { ... }                    # inclusive range
+for v in [10, 20, 30] { println(v) }      # iterate array elements
+for k in keys(mapVar) { println(k, mapVar[k]) }  # map keys, sorted
+for var i in 0..3 { i = i * 10 }          # `var` makes the loop variable assignable
 ```
 
 A range's end binds tightly: `for i in 0..n - 1` iterates `0..(n-1)`.
@@ -296,10 +298,10 @@ ranges, guards (`if`), and bindings that name the matched value. `_` or
 ```rust
 fn describe(n) -> match n {
     0 => "zero",
-    1 | 2 => "one or two",       // alternation
-    k if k < 0 => "negative",    // guard over the binding k
-    3..=9 => "a digit",          // inclusive range (3..9 is exclusive)
-    else => "many"               // catch-all: also spelled _
+    1 | 2 => "one or two",       # alternation
+    k if k < 0 => "negative",    # guard over the binding k
+    3..=9 => "a digit",          # inclusive range (3..9 is exclusive)
+    else => "many"               # catch-all: also spelled _
 }
 
 var size = match len(items) { 0 => "empty", 1..=5 => "small", _ => "big" }
@@ -332,14 +334,14 @@ anything — as an immutable map. Access members with dot syntax, which is
 sugar for `["key"]` on any map:
 
 ```rust
-import "math.rscp"             // binds the name from the file stem
-println(math.double(21))       // 42
-import "math.rscp" as m        // ...or pick your own name
+import "math.rscp"             # binds the name from the file stem
+println(math.double(21))       # 42
+import "math.rscp" as m        # ...or pick your own name
 println(m.golden)
 
 var cfg = {"host": "localhost", "port": 8080}
-println(cfg.port)              // dot reads...
-cfg.port = 9090                // ...and writes; cfg["port"] still works
+println(cfg.port)              # dot reads...
+cfg.port = 9090                # ...and writes; cfg["port"] still works
 ```
 
 Diamond imports run the module body once (a cache keyed by path). Cycles
@@ -359,7 +361,7 @@ indexes, missing map keys, failed assertions, `panic()` — and your own
 ```rust
 fn parse_int(s) {
     try { return int(s) }
-    catch e { return -1 }        // "int: cannot convert 's' ..."
+    catch e { return -1 }        # "int: cannot convert 's' ..."
 }
 
 try { risky(0) } catch e { println("failed:", e) }
@@ -380,8 +382,8 @@ exits with code 70 and a stack trace, exactly as before.
 ### Functions and closures
 
 ```rust
-fn add(a, b) -> a + b             // arrow body
-fn makeCounter() {                // closures capture by reference
+fn add(a, b) -> a + b             # arrow body
+fn makeCounter() {                # closures capture by reference
     var count = 0
     fn inc() { count++; return count }
     return inc
@@ -389,7 +391,7 @@ fn makeCounter() {                // closures capture by reference
 
 var tick = makeCounter()
 tick(); tick()
-println(tick())                   // 3 — count survived makeCounter's return
+println(tick())                   # 3 — count survived makeCounter's return
 ```
 
 * Functions are first-class: `let f = add; f(1, 2)`.
@@ -485,7 +487,7 @@ Concatenate with `+`, compare lexicographically with `<` and friends.
 
 ```rust
 let s = "rscp" + "!"
-println(s[0], len(s), s == "rscp!")    // r 5 true
+println(s[0], len(s), s == "rscp!")    # r 5 true
 ```
 
 A toolbox of builtins covers the everyday operations — `upper`, `lower`,
@@ -494,13 +496,13 @@ A toolbox of builtins covers the everyday operations — `upper`, `lower`,
 which also cuts arrays and understands negative, Python-style bounds:
 
 ```rust
-println(upper("héllo"))                  // HÉLLO
-println(split("a,b,c", ","))             // ["a", "b", "c"]
-println(join(["a", "b"], "-"))           // a-b
-println(replace("banana", "na", "NA"))   // baNANA
-println(find("banana", "na"))            // 2 (first index, or -1)
-println(slice("hello world", 0, 5))      // hello
-println(slice([1, 2, 3, 4], -2, 99))     // [3, 4]
+println(upper("héllo"))                  # HÉLLO
+println(split("a,b,c", ","))             # ["a", "b", "c"]
+println(join(["a", "b"], "-"))           # a-b
+println(replace("banana", "na", "NA"))   # baNANA
+println(find("banana", "na"))            # 2 (first index, or -1)
+println(slice("hello world", 0, 5))      # hello
+println(slice([1, 2, 3, 4], -2, 99))     # [3, 4]
 ```
 
 **f-strings** (Python-style interpolation) embed any expression in `{…}`;
@@ -510,8 +512,8 @@ other f-strings inside:
 ```rust
 let name = "RSCP"
 let n = 3
-println(f"{name}: {n} squared is {n ** 2}")   // RSCP: 3 squared is 9
-println(f"sum={1 + 2 * 3} nested={upper(f"{n}")}")  // sum=7 nested=3
+println(f"{name}: {n} squared is {n ** 2}")   # RSCP: 3 squared is 9
+println(f"sum={1 + 2 * 3} nested={upper(f"{n}")}")  # sum=7 nested=3
 ```
 
 The hole is parsed as a real expression at compile time, so mistakes inside
@@ -696,7 +698,7 @@ cargo test
 * **57 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **92 golden cases** in `tests/cases/`: each program's exact stdout is
+* **96 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
@@ -741,13 +743,18 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.5.0` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.5.0.0`), release
+(`2026.5.1` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.5.1.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.5.1.0** — Python-style comments. Line comments start with `#`;
+  `//` and `/* */` are no longer comment syntax (division still uses `/`),
+  and meeting one produces a clear migration hint pointing at `#`.
+  TODO/FIXME/NOTE/HACK/XXX are highlighted inside comments by the VS Code,
+  Sublime and Vim support. 57 unit tests, 96 golden cases.
 * **2026.5.0.0** — modules and record-style access. `import "file.rscp"`
   [as name] compiles the file once (path-relative, diamond-cached, cycles
   rejected) and binds its top-level bindings as an immutable map; `m.key`

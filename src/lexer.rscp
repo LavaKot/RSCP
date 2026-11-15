@@ -3,6 +3,8 @@
 //! Positions are 1-based. `line` advances on '\n'; `col` counts characters.
 //! Supported literals: integers (decimal, hex, `_` separators), floats
 //! (fractional part and/or exponent), and double-quoted strings with escapes.
+//! Comments run from '#' to the end of the line — Python style, no block
+//! comments (since 2026.5.1).
 //!
 //! Semicolons are optional: when a newline follows a token that can end a
 //! statement (Go-style automatic semicolon insertion), a `;` is synthesized
@@ -71,14 +73,7 @@ impl<'src> Lexer<'src> {
                     self.advance();
                     newline = true;
                 }
-                '/' if self.peek_second() == Some('/') => self.line_comment(),
-                '/' if self.peek_second() == Some('*') => {
-                    let line_before = self.line;
-                    self.block_comment()?;
-                    if self.line != line_before {
-                        newline = true; // a block comment spanning lines acts as a newline
-                    }
-                }
+                '#' => self.line_comment(),
                 _ => {
                     let tok = self.scan_token()?;
                     if newline
@@ -168,31 +163,6 @@ impl<'src> Lexer<'src> {
                 break;
             }
             self.advance();
-        }
-    }
-
-    fn block_comment(&mut self) -> Result<(), RscpError> {
-        let (sl, sc) = (self.line, self.col);
-        self.advance(); // '/'
-        self.advance(); // '*'
-        loop {
-            match self.peek() {
-                None => {
-                    return Err(RscpError::lex(
-                        "unterminated block comment (missing '*/')",
-                        sl,
-                        sc,
-                    ))
-                }
-                Some('*') if self.peek_second() == Some('/') => {
-                    self.advance();
-                    self.advance();
-                    return Ok(());
-                }
-                Some(_) => {
-                    self.advance();
-                }
-            }
         }
     }
 
@@ -811,14 +781,20 @@ mod tests {
 
     #[test]
     fn comments() {
-        let ts = lex("// line\n1 /* block */ 2");
+        // '#' comments run to the end of the line (since 2026.5.1).
+        let ts = lex("# line\n1 # trailing");
         let kinds: Vec<crate::token::TokenType> = ts.iter().map(|t| t.ty).collect();
-        assert_eq!(kinds, vec![crate::token::TokenType::Int, crate::token::TokenType::Int, crate::token::TokenType::Semicolon, crate::token::TokenType::Eof]);
-        assert_eq!((ts[1].line, ts[1].col), (2, 15));
-        // A block comment containing a newline acts like a newline.
-        let ts = lex("1 /* two\nlines */ 2");
+        assert_eq!(kinds, vec![crate::token::TokenType::Int, crate::token::TokenType::Semicolon, crate::token::TokenType::Eof]);
+        assert_eq!((ts[0].line, ts[0].col), (2, 1));
+        // A '#' comment swallows the rest of the line, so the next token
+        // starts on the following line.
+        let ts = lex("1 # two\n2");
         let kinds: Vec<crate::token::TokenType> = ts.iter().map(|t| t.ty).collect();
         assert_eq!(kinds, vec![crate::token::TokenType::Int, crate::token::TokenType::Semicolon, crate::token::TokenType::Int, crate::token::TokenType::Semicolon, crate::token::TokenType::Eof]);
+        // Division still lexes as Slash.
+        let ts = lex("1 / 2");
+        let kinds: Vec<crate::token::TokenType> = ts.iter().map(|t| t.ty).collect();
+        assert_eq!(kinds, vec![crate::token::TokenType::Int, crate::token::TokenType::Slash, crate::token::TokenType::Int, crate::token::TokenType::Semicolon, crate::token::TokenType::Eof]);
     }
 
     #[test]
@@ -873,7 +849,7 @@ mod tests {
     fn errors() {
         assert!(Lexer::new("\"unterminated").tokenize().is_err());
         assert!(Lexer::new("\"bad \\q escape\"").tokenize().is_err());
-        assert!(Lexer::new("/* never closed").tokenize().is_err());
+        assert!(Lexer::new("# a comment is never a lex error").tokenize().is_ok());
         assert!(Lexer::new("let a = $;").tokenize().is_err());
         assert!(Lexer::new("0x").tokenize().is_err());
         assert!(Lexer::new("0b").tokenize().is_err());

@@ -1,4 +1,4 @@
-// Trailing commas are allowed everywhere since 2026.2.0.0.
+# Trailing commas are allowed everywhere since 2026.2.0.0.
 let a = [1, 2, 3,]
 let m = {"k": 1,}
 fn f(x,) -> x

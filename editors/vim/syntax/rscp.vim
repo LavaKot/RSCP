@@ -1,4 +1,4 @@
-" Vim syntax file for RSCP 2026.5.0.0
+" Vim syntax file for RSCP 2026.5.1.0
 " Place in ~/.vim/syntax/rscp.vim (or ~/.config/nvim/syntax/rscp.vim),
 " together with the ftdetect rule from editors/vim/ftdetect/rscp.vim.
 
@@ -19,10 +19,9 @@ syntax keyword rscpBuiltin print println len str int float type abs min max
 syntax keyword rscpBuiltin sqrt pow rand clock push pop keys has assert panic upper lower trim
 syntax keyword rscpBuiltin split join replace contains starts_with ends_with slice find repeat ord chr
 
-" Comments
-syntax match rscpComment "//.*$" contains=rscpTodo
-syntax region rscpComment start="/\*" end="\*/" contains=rscpTodo
-syntax keyword rscpTodo TODO FIXME XXX NOTE contained
+" Comments (# to end of line, TODO tags stand out)
+syntax match rscpComment "#.*$" contains=rscpTodo
+syntax keyword rscpTodo TODO FIXME XXX NOTE HACK contained
 
 " Strings with escapes
 syntax region rscpString start=/"/ skip=/\\./ end=/"/ contains=rscpEscape

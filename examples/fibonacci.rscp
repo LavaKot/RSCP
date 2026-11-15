@@ -1,4 +1,4 @@
-// Fibonacci three ways: recursion, an arrow function, and a loop.
+# Fibonacci three ways: recursion, an arrow function, and a loop.
 fn fib(n) -> n < 2 ? n : fib(n - 1) + fib(n - 2)
 
 fn fibIter(n) {

@@ -1,4 +1,4 @@
-// The '{' of a body must stay on the condition's line.
+# The '{' of a body must stay on the condition's line.
 if x < 3
 {
     println("never")

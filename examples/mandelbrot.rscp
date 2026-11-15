@@ -1,4 +1,4 @@
-// ASCII Mandelbrot set: ranges, nested loops, floats and string building.
+# ASCII Mandelbrot set: ranges, nested loops, floats and string building.
 let width = 60
 let height = 20
 

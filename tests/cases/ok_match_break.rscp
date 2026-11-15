@@ -1,5 +1,5 @@
-// match nested inside compound assignment, with break and continue
-// jumping out of the loop from an arm body.
+# match nested inside compound assignment, with break and continue
+# jumping out of the loop from an arm body.
 var total = 0
 for i in 0..10 {
     total += match i {

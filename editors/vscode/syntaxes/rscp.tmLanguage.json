@@ -50,17 +50,13 @@
     "comments": {
       "patterns": [
         {
-          "name": "comment.line.double-slash.rscp",
-          "match": "//.*$"
-        },
-        {
-          "name": "comment.block.rscp",
-          "begin": "/\\*",
-          "end": "\\*/",
+          "name": "comment.line.number-sign.rscp",
+          "begin": "#",
+          "end": "$",
           "patterns": [
             {
-              "name": "comment.block.rscp",
-              "match": "."
+              "match": "\\b(TODO|FIXME|NOTE|HACK|XXX)\\b",
+              "name": "keyword.other.todo.rscp"
             }
           ]
         }

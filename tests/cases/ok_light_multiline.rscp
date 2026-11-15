@@ -1,5 +1,5 @@
-// Multiline literals with trailing commas, continuation lines that start
-// with an operator, `else` on its own line.
+# Multiline literals with trailing commas, continuation lines that start
+# with an operator, `else` on its own line.
 let xs = [
     10,
     20,

@@ -139,6 +139,24 @@ impl Parser {
         RscpError::parse(msg, tok.line, tok.col, false)
     }
 
+    /// A friendly error for pre-2026.5.1 `//` and `/* */` comments: they are
+    /// no longer lexed away, so they surface as stray '/' tokens.
+    fn old_comment_hint(&self) -> Option<RscpError> {
+        if self.peek_ty() == TokenType::Slash {
+            if self.peek_at(1).ty == TokenType::Slash {
+                return Some(self.error_here(
+                    "line comments start with '#', not '//' (since 2026.5.1)",
+                ));
+            }
+            if self.peek_at(1).ty == TokenType::Star {
+                return Some(self.error_here(
+                    "block comments '/* */' were removed in 2026.5.1; use '#' line comments",
+                ));
+            }
+        }
+        None
+    }
+
     /// Terminate a statement: a `;` (explicit or inserted), or the `}` of
     /// the enclosing block, which makes the `;` optional (Go/Rust style).
     fn end_statement(&mut self, what: &str) -> PResult<()> {
@@ -147,6 +165,9 @@ impl Parser {
         }
         if self.check(TokenType::RBrace) {
             return Ok(());
+        }
+        if let Some(e) = self.old_comment_hint() {
+            return Err(e);
         }
         Err(self.error_here(format!(
             "expected ';' (or '}}') {what}"
@@ -851,7 +872,14 @@ impl Parser {
         loop {
             let op = match self.peek_ty() {
                 TokenType::Star => BinaryOp::Mul,
-                TokenType::Slash => BinaryOp::Div,
+                TokenType::Slash => {
+                    // `a // c` / `a /* c */` — a pre-2026.5.1 comment where a
+                    // division operand was expected.
+                    if let Some(e) = self.old_comment_hint() {
+                        return Err(e);
+                    }
+                    BinaryOp::Div
+                }
                 TokenType::Percent => BinaryOp::Mod,
                 _ => return Ok(lhs),
             };
@@ -1074,10 +1102,15 @@ impl Parser {
                 self.advance();
                 self.match_expression()
             }
-            _ => Err(self.error_here(format!(
-                "unexpected {} in an expression",
-                tok.ty.describe()
-            ))),
+            _ => {
+                if let Some(e) = self.old_comment_hint() {
+                    return Err(e);
+                }
+                Err(self.error_here(format!(
+                    "unexpected {} in an expression",
+                    tok.ty.describe()
+                )))
+            }
         }
     }
 
@@ -1602,5 +1635,10 @@ fn f(
         assert!(matches!(parse_err("if (x) 1;"), RscpError::Parse { .. })); // braces required
         assert!(matches!(parse_err("if x { } 1 { }"), RscpError::Parse { .. })); // '{' after condition only
         assert!(matches!(parse_err("for i in 0.. { }"), RscpError::Parse { .. })); // missing range end
+        // Pre-2026.5.1 comments get a migration hint instead of a cryptic '/' error.
+        let e = parse_err("let a = 1 // old style");
+        assert!(matches!(&e, RscpError::Parse { msg, .. } if msg.contains("line comments start with '#'")));
+        let e = parse_err("1 /* block */ 2");
+        assert!(matches!(&e, RscpError::Parse { msg, .. } if msg.contains("block comments")));
     }
 }

@@ -1,16 +1,16 @@
-// `for x in xs` binds x freshly each iteration (no let needed).
+# `for x in xs` binds x freshly each iteration (no let needed).
 var names = ["a", "b", "c"]
 for name in names {
     println(name)
 }
-// Shadowing still works as with let.
+# Shadowing still works as with let.
 var x = 1
 {
     let x = 2
     println(x)
 }
 println(x)
-// for var makes the loop variable assignable inside the body.
+# for var makes the loop variable assignable inside the body.
 for var i in 0..3 {
     i = i * 10
     println(i)

@@ -1,4 +1,4 @@
-// Rust-style short closures with implicit return.
+# Rust-style short closures with implicit return.
 let double = |x| x * 2
 let add = |a, b| a + b
 let constant = || 42

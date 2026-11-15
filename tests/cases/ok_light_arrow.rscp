@@ -1,4 +1,4 @@
-// Arrow function bodies: an implicit `return`.
+# Arrow function bodies: an implicit `return`.
 fn square(x) -> x * x
 fn greet(name) -> "hi, " + name
 fn makeAdder(n) -> |x| x + n

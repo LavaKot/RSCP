@@ -1,4 +1,4 @@
-// match: literals, alternation, guards, ranges and a catch-all.
+# match: literals, alternation, guards, ranges and a catch-all.
 fn describe(n) -> match n {
     0 => "zero",
     1 | 2 => "one-or-two",

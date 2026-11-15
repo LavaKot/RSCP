@@ -1,4 +1,3 @@
-// Nothing but comments and an empty block.
-/* block
-   comment */
+# Nothing but comments and an empty block.
+# TODO comments are ordinary comments (editors highlight the tag).
 { }

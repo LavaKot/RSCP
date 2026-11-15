@@ -1,5 +1,5 @@
-// String and sequence builtins: upper lower trim split join replace
-// contains starts_with ends_with slice find repeat ord chr.
+# String and sequence builtins: upper lower trim split join replace
+# contains starts_with ends_with slice find repeat ord chr.
 let s = "  Hello, RSCP!  "
 println(upper(s), "|", lower(s), "|", trim(s))
 println(split("a,b,,c", ","), len(split("a,b,,c", ",")))

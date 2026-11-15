@@ -1,10 +1,10 @@
-// Helper module for ok_import.rscp (the leading '_' keeps the golden
-// harness from running it as a standalone case).
+# Helper module for ok_import.rscp (the leading '_' keeps the golden
+# harness from running it as a standalone case).
 let golden = 1.618
 fn double(x) -> x * 2
 fn shout(s) -> upper(s) + "!"
 
-// Module state works through exported closures and reference types.
+# Module state works through exported closures and reference types.
 fn make_counter() { var c = 0; return || { c++; return c } }
 let ticks = make_counter()
 var registry = [golden]

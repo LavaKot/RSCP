@@ -1,5 +1,5 @@
-// f-strings: interpolation of any expression, nested strings and f-strings,
-// {{ }} escapes, literal-only f-strings.
+# f-strings: interpolation of any expression, nested strings and f-strings,
+# {{ }} escapes, literal-only f-strings.
 let name = "RSCP"
 let n = 3
 println(f"hello {name}, {n} squared is {n ** 2}")

@@ -1,5 +1,5 @@
-// Pattern matching with match: literals, alternation, guards, ranges,
-// bindings and block bodies. A match is an expression.
+# Pattern matching with match: literals, alternation, guards, ranges,
+# bindings and block bodies. A match is an expression.
 
 fn describe(n) -> match n {
     0 => "zero",
@@ -13,8 +13,8 @@ for n in [-2, 0, 2, 7, 42] {
     println(n, "is", describe(n))
 }
 
-// Bitwise operators & | ^ ~ << >> with 0b/0o/0x literals.
-let permissions = 0b1101 // read | write | execute
+# Bitwise operators & | ^ ~ << >> with 0b/0o/0x literals.
+let permissions = 0b1101 # read | write | execute
 let mask = 0b0100
 println("write? ", permissions & mask != 0)
 println("flags: ", permissions | 0b10000, " flipped: ", permissions ^ 0xFF)

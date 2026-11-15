@@ -1,3 +1,3 @@
-// Shift amounts must stay within 0..64.
+# Shift amounts must stay within 0..64.
 let x = 1 << 64
 println(x)
