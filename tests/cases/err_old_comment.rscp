@@ -1,1 +1,2 @@
-let a = 1 // the pre-2026.5.1 comment style
+let a = 1 /* the pre-2026.5.1 block comment style */
+let b = a + 2

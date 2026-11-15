@@ -1107,13 +1107,16 @@ impl Parser {
             let op = match self.peek_ty() {
                 TokenType::Star => BinaryOp::Mul,
                 TokenType::Slash => {
-                    // `a // c` / `a /* c */` — a pre-2026.5.1 comment where a
-                    // division operand was expected.
+                    // `a /* c */` — block comments were removed in 2026.5.1
+                    // and keep their migration hint. `//` is floor division
+                    // since 26.0.12.5: the lexer folds it into one token, so
+                    // the hint's line-comment branch can no longer fire.
                     if let Some(e) = self.old_comment_hint() {
                         return Err(e);
                     }
                     BinaryOp::Div
                 }
+                TokenType::SlashSlash => BinaryOp::FloorDiv,
                 TokenType::Percent => BinaryOp::Mod,
                 _ => return Ok(lhs),
             };
@@ -2065,9 +2068,9 @@ fn f(
         assert_eq!(parse("if x 1").len(), 1); // single-statement body (2026.5.6)
         assert!(matches!(parse_err("if x { } 1 { }"), RscpError::Parse { .. })); // '{' after condition only
         assert!(matches!(parse_err("for i in 0.. { }"), RscpError::Parse { .. })); // missing range end
-        // Pre-2026.5.1 comments get a migration hint instead of a cryptic '/' error.
-        let e = parse_err("let a = 1 // old style");
-        assert!(matches!(&e, RscpError::Parse { msg, .. } if msg.contains("line comments start with '#'")));
+        // `//` is floor division since 26.0.12.5 (the pre-2026.5.1
+        // comment migration hint is gone with it).
+        assert_eq!(parse("let a = 1 // 2").len(), 1);
         let e = parse_err("1 /* block */ 2");
         assert!(matches!(&e, RscpError::Parse { msg, .. } if msg.contains("block comments")));
         // Parenthesized conditions are rejected since 2026.5.2...

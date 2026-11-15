@@ -536,6 +536,28 @@ impl Vm {
                             )),
                         }
                     }
+                    Op::FloorDiv => {
+                        // Floor division (26.0.12.5): ints floor toward
+                        // -infinity like Python's `//`; floats floor the
+                        // quotient.
+                        let b = self.stack.pop().unwrap();
+                        let a = self.stack.pop().unwrap();
+                        let r = match (a, b) {
+                            (Value::Int(x), Value::Int(y)) => floor_div_i64(op_ip, x, y).map(Value::Int),
+                            (Value::Float(x), Value::Float(y)) => Ok(Value::Float((x / y).floor())),
+                            (Value::Int(x), Value::Float(y)) => Ok(Value::Float(((x as f64) / y).floor())),
+                            (Value::Float(x), Value::Int(y)) => Ok(Value::Float((x / (y as f64)).floor())),
+                            (lhs, rhs) => Err(RtError::boxed("TYPE", format!(
+                                "'//' needs numbers, got {} and {}",
+                                lhs.type_name(),
+                                rhs.type_name()
+                            ))),
+                        };
+                        match r {
+                            Ok(v) => self.stack.push(v),
+                            Err(e) => rte!(op_ip, e),
+                        }
+                    }
                     Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
                         let rhs = self.stack.pop().unwrap();
                         // Fast path (26.0.9.0): numeric operands update the
@@ -1549,6 +1571,24 @@ fn arith_symbol(op: Op) -> &'static str {
         Op::Mul => "*",
         Op::Div => "/",
         _ => "%",
+    }
+}
+
+/// Floor division on ints (26.0.12.5): toward -infinity, like Python's
+/// `//` — `-7 // 2` is `-4`. i64::MIN // -1 overflows; // 0 is DIV_ZERO.
+fn floor_div_i64(_op_ip: usize, a: i64, b: i64) -> Result<i64, Box<RtError>> {
+    if b == 0 {
+        return Err(RtError::boxed("DIV_ZERO", "division by zero"));
+    }
+    let q = match a.checked_div(b) {
+        Some(q) => q,
+        None => return Err(RtError::boxed("INT_OVERFLOW", "integer overflow in '//'")),
+    };
+    let r = a % b;
+    if r != 0 && ((r < 0) != (b < 0)) {
+        Ok(q - 1)
+    } else {
+        Ok(q)
     }
 }
 

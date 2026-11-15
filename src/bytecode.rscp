@@ -44,6 +44,7 @@ pub enum Op {
     Sub,
     Mul,
     Div,
+    FloorDiv,
     Mod,
     /// absolute jump to u16
     Jump,
@@ -133,7 +134,7 @@ pub enum Op {
     ArgsIs,
 }
 
-const ALL_OPS: [Op; 65] = [
+const ALL_OPS: [Op; 66] = [
     Op::Constant,
     Op::Null,
     Op::True,
@@ -159,6 +160,7 @@ const ALL_OPS: [Op; 65] = [
     Op::Sub,
     Op::Mul,
     Op::Div,
+    Op::FloorDiv,
     Op::Mod,
     Op::Jump,
     Op::JumpIfFalsePeek,
@@ -233,6 +235,7 @@ impl Op {
             Op::Sub => "Sub",
             Op::Mul => "Mul",
             Op::Div => "Div",
+            Op::FloorDiv => "FloorDiv",
             Op::Mod => "Mod",
             Op::Jump => "Jump",
             Op::JumpIfFalsePeek => "JumpIfFalsePeek",

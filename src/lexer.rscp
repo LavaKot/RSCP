@@ -700,6 +700,10 @@ impl<'src> Lexer<'src> {
                     self.advance();
                     SlashAssign
                 }
+                Some('/') => {
+                    self.advance();
+                    SlashSlash // floor division (26.0.12.5)
+                }
                 _ => Slash,
             },
             '%' => match second {

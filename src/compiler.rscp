@@ -1387,6 +1387,7 @@ impl Compiler {
             BinaryOp::Sub => Op::Sub,
             BinaryOp::Mul => Op::Mul,
             BinaryOp::Div => Op::Div,
+            BinaryOp::FloorDiv => Op::FloorDiv,
             BinaryOp::Mod => Op::Mod,
             BinaryOp::Pow => Op::Pow,
             BinaryOp::InstanceOf => Op::InstanceOf,

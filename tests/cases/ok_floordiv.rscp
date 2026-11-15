@@ -1,0 +1,16 @@
+# Floor division (26.0.12.5): int//int floors toward -infinity like Python,
+# floats floor the quotient, mixed promotes.
+println(7 // 2, -7 // 2, 7 // -2, -7 // -2)
+println(7.5 // 2, -7.5 // 2, 7 // 2.0)
+println(6 // 3, 0 // 5)
+var codes = []
+try { 1 // 0 } catch e { push(codes, e.code) }
+try { (-9223372036854775807 - 1) // -1 } catch e { push(codes, e.code) }
+try { "a" // 2 } catch e { push(codes, e.code) }
+println(join(codes, " "))
+# the classic use: paging (last-page rounding)
+var total = 101
+var per = 10
+println(total // per, (total + per - 1) // per)
+# // vs / vs **: the arithmetic trio
+println(5 / 2, 5 // 2, 5.0 / 2, 5 ** 2)

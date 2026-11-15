@@ -96,6 +96,7 @@ pub enum TokenType {
     Star,
     StarStar,
     Slash,
+    SlashSlash,
     Percent,
     // Bitwise operators
     Amp,
@@ -196,6 +197,7 @@ impl TokenType {
             Star => "'*'",
             StarStar => "'**'",
             Slash => "'/'",
+            SlashSlash => "'//'",
             Percent => "'%'",
             Amp => "'&'",
             Caret => "'^'",
