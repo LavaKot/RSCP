@@ -14,13 +14,79 @@ use crate::bytecode::FnProto;
 use crate::fxhash::FxBuild;
 use crate::vm::Vm;
 
+/// A runtime failure: a stable machine-readable `code` (see the error-code
+/// table in the docs), the human-readable message, and an optional
+/// structured `detail` payload (e.g. `{"index": 9, "length": 1}` for an
+/// out-of-bounds access). Shared by VM raises, native builtins and `throw`.
+pub struct RtError {
+    pub code: &'static str,
+    pub msg: String,
+    pub detail: Value,
+}
+
+impl RtError {
+    pub fn new(code: &'static str, msg: impl Into<String>) -> Self {
+        RtError { code, msg: msg.into(), detail: Value::Null }
+    }
+
+    pub fn with_detail(code: &'static str, msg: impl Into<String>, detail: Value) -> Self {
+        RtError { code, msg: msg.into(), detail }
+    }
+
+    /// Boxed constructors: the hot `Result<Value, Box<RtError>>` stays
+    /// small (a pointer), so arith/index helpers keep their register
+    /// returns — the allocation only happens on the error path (26.0.10.0).
+    pub fn boxed(code: &'static str, msg: impl Into<String>) -> Box<RtError> {
+        Box::new(RtError::new(code, msg))
+    }
+
+    pub fn boxed_with_detail(
+        code: &'static str,
+        msg: impl Into<String>,
+        detail: Value,
+    ) -> Box<RtError> {
+        Box::new(RtError::with_detail(code, msg, detail))
+    }
+}
+
 /// A native (Rust-implemented) function. The arguments arrive as a slice
-/// (no per-call Vec allocation since 26.0.9.0).
-pub type NativeFn = fn(&mut Vm, &[Value]) -> Result<Value, String>;
+/// (no per-call Vec allocation since 26.0.9.0); failures carry a code.
+pub type NativeFn = fn(&mut Vm, &[Value]) -> Result<Value, Box<RtError>>;
 
 /// User-facing map values: `Rc<str>` keys (inserting a key from a string
 /// value moves the existing `Rc`, no allocation), FxHash for speed.
 pub type ValueMap = HashMap<Rc<str>, Value, FxBuild>;
+
+/// The error value bound by `catch`: a map
+/// `{"__error__": true, "code": ..., "message": ..., "detail": ...}`.
+/// `print(e)` renders just the message (Python-style `str(e)`); the
+/// structured fields are there for programmatic use (26.0.10.0).
+pub fn error_value(code: &str, message: String, detail: Value) -> Value {
+    let mut m = ValueMap::with_capacity_and_hasher(4, Default::default());
+    m.insert(Rc::from("__error__"), Value::Bool(true));
+    m.insert(Rc::from("code"), Value::str(code));
+    m.insert(Rc::from("message"), Value::str(message));
+    m.insert(Rc::from("detail"), detail);
+    Value::Map(Rc::new(RefCell::new(m)))
+}
+
+/// True for values produced by `error_value` (used to rethrow as-is).
+pub fn is_error_value(v: &Value) -> bool {
+    match v {
+        Value::Map(m) => matches!(m.borrow().get("__error__"), Some(Value::Bool(true))),
+        _ => false,
+    }
+}
+
+/// Build a small structured detail payload for errors,
+/// e.g. `detail(&[("index", Value::Int(9)), ("length", Value::Int(1))])`.
+pub fn detail(pairs: &[(&str, Value)]) -> Value {
+    let mut m = ValueMap::with_capacity_and_hasher(pairs.len(), Default::default());
+    for (k, v) in pairs {
+        m.insert(Rc::from(*k), v.clone());
+    }
+    Value::Map(Rc::new(RefCell::new(m)))
+}
 
 /// A compiled function plus its captured upvalues.
 pub struct FunctionVal {
@@ -111,9 +177,19 @@ impl Value {
                 format!("[{}]", parts.join(", "))
             }
             Value::Map(m) => {
-                // Classes and instances print compactly (2026.6.0).
+                // Classes and instances print compactly (2026.6.0); error
+                // objects print as their message (26.0.10.0), like
+                // Python's str(e).
                 {
                     let mref = m.borrow();
+                    if matches!(mref.get("__error__"), Some(Value::Bool(true))) {
+                        return mref
+                            .get("message")
+                            .map_or(String::new(), |v| match v {
+                                Value::Str(s) => s.to_string(),
+                                _ => String::new(),
+                            });
+                    }
                     if let Some(Value::Map(class)) = mref.get("__class__") {
                         let name = class
                             .borrow()

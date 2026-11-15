@@ -1,0 +1,1 @@
+try { a() } catch e code 5 { b() }

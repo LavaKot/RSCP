@@ -1,4 +1,4 @@
-# Error handling: try/catch/throw, safe wrappers, retries.
+# Error handling: typed errors, selective catch, retries.
 
 # Wrap a fallible conversion.
 fn parse_int(s) {
@@ -14,9 +14,32 @@ fn div(a, b) {
 }
 println(div(10, 2), div(1, 0))
 
-# Retry loop: attempt something three times.
+# Errors are typed objects: e.code, e.message, e.detail (26.0.10.0).
+try {
+    let arr = [1, 2, 3]
+    println(arr[99])
+} catch e {
+    println(e.code, "|", e.message, "|", e.detail.index, "of", e.detail.length)
+}
+
+# Selective catch: only handle DIV_ZERO, rethrow everything else upward.
+fn safe_div(a, b) {
+    try { return a / b }
+    catch e code "DIV_ZERO" { return null }
+}
+try { println(safe_div(1, 0), safe_div(1, "x")) } catch e { println("rethrown:", e.code) }
+
+# Multiple clauses and a `where` filter.
+fn describe(n) {
+    try { return 100 / n }
+    catch e where e.code != "DIV_ZERO" { return "bad type" }
+    catch e { return "cannot divide by zero" }
+}
+println(describe(4), describe(0), describe("x"))
+
+# Typed errors of your own: throw error(code, message, detail).
 fn flaky(n) {
-    if n < 2 { throw f"attempt {n} failed" }
+    if n < 2 { throw error("FLAKY", f"attempt {n} failed", {"attempt": n}) }
     return "ok"
 }
 var result = "gave up"
@@ -24,19 +47,11 @@ for attempt in 1..=3 {
     try {
         result = flaky(attempt)
         break
-    } catch e {
-        println(f"retry after: {e}")
+    } catch e code "FLAKY" {
+        println(f"retry after: {e.message} (attempt {e.detail.attempt})")
     }
 }
 println("result:", result)
-
-# Errors carry only a message; check it with the string tools.
-try {
-    let arr = [1, 2, 3]
-    println(arr[99])
-} catch e {
-    println(starts_with(e, "index"), "|", e)
-}
 
 # Collect the outcome of many operations without crashing.
 var failures = 0

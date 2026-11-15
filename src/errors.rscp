@@ -30,6 +30,11 @@ pub enum RscpError {
         col: usize,
     },
     Runtime {
+        /// Machine-readable code ("DIV_ZERO", "MISSING_KEY", ...); kept for
+        /// tests and future tooling — the rendered output shows only the
+        /// message (26.0.10.0).
+        #[allow(dead_code)]
+        code: String,
         msg: String,
         line: usize,
         trace: Vec<TraceFrame>,
@@ -50,7 +55,12 @@ impl RscpError {
     }
 
     pub fn runtime(msg: impl Into<String>, line: usize) -> Self {
-        RscpError::Runtime { msg: msg.into(), line, trace: Vec::new() }
+        RscpError::Runtime {
+            code: "RUNTIME".to_string(),
+            msg: msg.into(),
+            line,
+            trace: Vec::new(),
+        }
     }
 
     /// Lower-case stage name, e.g. "syntax error".
@@ -86,6 +96,16 @@ impl RscpError {
     /// The REPL uses this to keep reading lines instead of reporting an error.
     pub fn is_at_eof(&self) -> bool {
         matches!(self, RscpError::Parse { at_eof: true, .. })
+    }
+
+    /// Machine-readable code for runtime errors ("DIV_ZERO", ...); empty
+    /// for the other classes. Used by the test suite (26.0.10.0).
+    #[cfg(test)]
+    pub fn runtime_code(&self) -> &str {
+        match self {
+            RscpError::Runtime { code, .. } => code,
+            _ => "",
+        }
     }
 
     /// Process exit code for this error class (sysexits-style).

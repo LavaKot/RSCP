@@ -5,16 +5,16 @@ fn risky(n) -> 100 / n
 
 try { risky(0) } catch e { push(log, e) }
 try { throw "custom" } catch e { push(log, e) }
-try { let arr = [1] ; println(arr[9]) } catch e { push(log, slice(e, 0, 5)) }
+try { let arr = [1] ; println(arr[9]) } catch e { push(log, slice(str(e), 0, 5)) }
 try { println("fine") } catch { push(log, "unreached") }
 
 # Errors unwind through function calls into the caller's try.
-fn wrapper() { try { return risky(0) } catch e { return "wrapped: " + e } }
+fn wrapper() { try { return risky(0) } catch e { return "wrapped: " + str(e) } }
 push(log, wrapper())
 
 # Nested try with a rethrow.
 try {
-    try { throw "inner" } catch e { throw "outer saw " + e }
+    try { throw "inner" } catch e { throw "outer saw " + str(e) }
 } catch e2 { push(log, e2) }
 
 # break and continue leave try bodies cleanly.
@@ -32,5 +32,39 @@ push(log, seen)
 var saved = ""
 try { panic("captured") } catch msg { saved = |m| upper(m) }
 push(log, saved("x"))
+
+# Typed errors (26.0.10.0): every catch binding is an object with
+# code / message / detail; print(e) still shows just the message.
+var codes = []
+try { 1 / 0 } catch e { push(codes, e.code) }
+try { 1 % 0 } catch e { push(codes, e.code) }
+try { let m = {} ; m.x } catch e { push(codes, e.code) }
+try { let a = [1] ; a[9] } catch e { push(codes, e.code + ":" + str(e.detail.index)) }
+try { nope() } catch e { push(codes, e.code) }
+try { len(5) } catch e { push(codes, e.code) }
+try { assert(false) } catch e { push(codes, e.code) }
+try { panic("p") } catch e { push(codes, e.code) }
+try { match 99 { 1 => "one" } } catch e { push(codes, e.code) }
+try { throw "user string" } catch e { push(codes, e.code) }
+try { throw {"code": "MY_CODE", "message": "custom map throw"} } catch e { push(codes, e.code + "/" + str(e.message)) }
+try { throw error("BUILT", "via error()", {"n": 7}) } catch e { push(codes, e.code + "/" + str(e.detail.n)) }
+push(log, join(codes, " "))
+
+# Selective catch: the matching clause runs, the others decline.
+fn picky(n) {
+    try { return 100 / n }
+    catch e code "DIV_ZERO" { return "div0" }
+    catch e where e.code == "TYPE" { return "type" }
+    catch e { return "other" }
+}
+push(log, picky(4))
+push(log, picky(0))
+push(log, picky("x"))
+push(log, picky(null))
+
+# A guard that declines everything rethrows the original error object.
+try {
+    try { 1 / 0 } catch e code "NOPE" { push(log, "unreached") }
+} catch e2 { push(log, "rethrown " + e2.code) }
 
 for entry in log { println(entry) }

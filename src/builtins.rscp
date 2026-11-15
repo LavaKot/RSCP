@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::value::Value;
+use crate::value::{RtError, Value};
 use crate::vm::Vm;
 
 pub fn install(vm: &mut Vm) {
@@ -34,6 +34,7 @@ pub fn install(vm: &mut Vm) {
     vm.define_native("has", n_has);
     vm.define_native("assert", n_assert);
     vm.define_native("panic", n_panic);
+    vm.define_native("error", n_error);
     vm.define_native("upper", n_upper);
     vm.define_native("lower", n_lower);
     vm.define_native("trim", n_trim);
@@ -60,7 +61,7 @@ fn join_display(args: &[Value]) -> String {
 /// `write(a, ...)` — print without a trailing newline. Goes through the
 /// VM's output, which is block-buffered when stdout is a pipe/file
 /// (26.0.9.0): print-heavy scripts stop paying a flush per line.
-fn n_write(vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_write(vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if !vm.quiet {
         vm.out.write_str(&join_display(args));
     }
@@ -69,41 +70,41 @@ fn n_write(vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 
 /// `print(a, ...)` / `println(a, ...)` — print and end the line.
 /// Since 2026.5.5 `print` is the Python-style primary name.
-fn n_println(vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_println(vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if !vm.quiet {
         vm.out.write_line(&join_display(args));
     }
     Ok(Value::Null)
 }
 
-fn n_len(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_len(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("len", &args)?;
     let n = match v {
         Value::Str(s) => s.chars().count() as i64,
         Value::Array(a) => a.borrow().len() as i64,
         Value::Map(m) => m.borrow().len() as i64,
         other => {
-            return Err(format!(
+            return Err(RtError::boxed("ARG", format!(
                 "len: expected a string, array or map, got {}",
                 other.type_name()
-            ))
+            )))
         }
     };
     Ok(Value::Int(n))
 }
 
-fn n_str(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_str(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("str", &args)?;
     Ok(Value::str(v.display_string(0)))
 }
 
-fn n_int(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_int(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("int", &args)?;
     match v {
         Value::Int(i) => Ok(Value::Int(i)),
         Value::Float(f) => {
             if f.is_nan() || f.is_infinite() || f >= 9.223372036854776e18 || f < -9.223372036854776e18 {
-                Err(format!("int: value {f:?} is out of range"))
+                Err(RtError::boxed("CONVERT", format!("int: value {f:?} is out of range")))
             } else {
                 Ok(Value::Int(f.trunc() as i64))
             }
@@ -112,15 +113,15 @@ fn n_int(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
             .trim()
             .parse::<i64>()
             .map(Value::Int)
-            .map_err(|_| format!("int: cannot convert '{s}' to an integer")),
-        other => Err(format!(
+            .map_err(|_| RtError::boxed("CONVERT", format!("int: cannot convert '{s}' to an integer"))),
+        other => Err(RtError::boxed("CONVERT", format!(
             "int: expected a number or a numeric string, got {}",
             other.type_name()
-        )),
+        ))),
     }
 }
 
-fn n_float(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_float(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("float", &args)?;
     match v {
         Value::Int(i) => Ok(Value::Float(i as f64)),
@@ -129,15 +130,15 @@ fn n_float(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
             .trim()
             .parse::<f64>()
             .map(Value::Float)
-            .map_err(|_| format!("float: cannot convert '{s}' to a float")),
-        other => Err(format!(
+            .map_err(|_| RtError::boxed("CONVERT", format!("float: cannot convert '{s}' to a float"))),
+        other => Err(RtError::boxed("CONVERT", format!(
             "float: expected a number or a numeric string, got {}",
             other.type_name()
-        )),
+        ))),
     }
 }
 
-fn n_type(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_type(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("type", &args)?;
     // Instances report their class name; classes report "class" (2026.6.0).
     if let Value::Map(m) = &v {
@@ -162,37 +163,37 @@ fn n_type(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     Ok(Value::str(v.type_name()))
 }
 
-fn n_abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("abs", &args)?;
     match v {
         Value::Int(i) => i
             .checked_abs()
             .map(Value::Int)
-            .ok_or_else(|| "abs: integer overflow".to_string()),
+            .ok_or_else(|| RtError::boxed("INT_OVERFLOW", "abs: integer overflow")),
         Value::Float(f) => Ok(Value::Float(f.abs())),
-        other => Err(format!(
+        other => Err(RtError::boxed("ARG", format!(
             "abs: expected a number, got {}",
             other.type_name()
-        )),
+        ))),
     }
 }
 
-fn two_numbers(name: &str, args: &[Value]) -> Result<(Value, Value), String> {
+fn two_numbers(name: &str, args: &[Value]) -> Result<(Value, Value), Box<RtError>> {
     if args.len() != 2 {
-        return Err(format!("{name}: expected 2 arguments, got {}", args.len()));
+        return Err(RtError::boxed("ARG", format!("{name}: expected 2 arguments, got {}", args.len())));
     }
     for a in &args[..2] {
         if !matches!(a, Value::Int(_) | Value::Float(_)) {
-            return Err(format!(
+            return Err(RtError::boxed("ARG", format!(
                 "{name}: expected numbers, got {}",
                 a.type_name()
-            ));
+            )));
         }
     }
     Ok((args[0].clone(), args[1].clone()))
 }
 
-fn n_min(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_min(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let (a, b) = two_numbers("min", &args)?;
     match Value::num_cmp(&a, &b) {
         Some(std::cmp::Ordering::Greater) => Ok(b),
@@ -200,7 +201,7 @@ fn n_min(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     }
 }
 
-fn n_max(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_max(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let (a, b) = two_numbers("max", &args)?;
     match Value::num_cmp(&a, &b) {
         Some(std::cmp::Ordering::Less) => Ok(b),
@@ -208,19 +209,19 @@ fn n_max(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     }
 }
 
-fn n_sqrt(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_sqrt(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("sqrt", &args)?;
     match v {
         Value::Int(i) => Ok(Value::Float((i as f64).sqrt())),
         Value::Float(f) => Ok(Value::Float(f.sqrt())),
-        other => Err(format!(
+        other => Err(RtError::boxed("ARG", format!(
             "sqrt: expected a number, got {}",
             other.type_name()
-        )),
+        ))),
     }
 }
 
-fn n_pow(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_pow(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let (a, b) = two_numbers("pow", &args)?;
     let x = match a {
         Value::Int(i) => i as f64,
@@ -235,11 +236,11 @@ fn n_pow(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     Ok(Value::Float(x.powf(y)))
 }
 
-fn n_rand(vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
+fn n_rand(vm: &mut Vm, _args: &[Value]) -> Result<Value, Box<RtError>> {
     Ok(Value::Float(vm.next_rand()))
 }
 
-fn n_clock(_vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
+fn n_clock(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Box<RtError>> {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -247,37 +248,37 @@ fn n_clock(_vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
     Ok(Value::Float(secs))
 }
 
-fn n_push(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_push(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if args.len() != 2 {
-        return Err(format!("push: expected 2 arguments (array, value), got {}", args.len()));
+        return Err(RtError::boxed("ARG", format!("push: expected 2 arguments (array, value), got {}", args.len())));
     }
     match &args[0] {
         Value::Array(a) => {
             a.borrow_mut().push(args[1].clone());
             Ok(Value::Null)
         }
-        other => Err(format!(
+        other => Err(RtError::boxed("ARG", format!(
             "push: expected an array, got {}",
             other.type_name()
-        )),
+        ))),
     }
 }
 
-fn n_pop(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_pop(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("pop", &args)?;
     match v {
         Value::Array(a) => match a.borrow_mut().pop() {
             Some(v) => Ok(v),
-            None => Err("pop: array is empty".to_string()),
+            None => Err(RtError::boxed("ARG", "pop: array is empty")),
         },
-        other => Err(format!(
+        other => Err(RtError::boxed("ARG", format!(
             "pop: expected an array, got {}",
             other.type_name()
-        )),
+        ))),
     }
 }
 
-fn n_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("keys", &args)?;
     match v {
         Value::Map(m) => {
@@ -286,145 +287,174 @@ fn n_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
             let items: Vec<Value> = ks.into_iter().map(Value::Str).collect();
             Ok(Value::Array(Rc::new(RefCell::new(items))))
         }
-        other => Err(format!(
+        other => Err(RtError::boxed("ARG", format!(
             "keys: expected a map, got {}",
             other.type_name()
-        )),
+        ))),
     }
 }
 
-fn n_has(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_has(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if args.len() != 2 {
-        return Err(format!("has: expected 2 arguments (map, key), got {}", args.len()));
+        return Err(RtError::boxed("ARG", format!("has: expected 2 arguments (map, key), got {}", args.len())));
     }
     match (&args[0], &args[1]) {
         (Value::Map(m), Value::Str(k)) => Ok(Value::Bool(m.borrow().contains_key(&**k))),
-        (Value::Map(_), other) => Err(format!(
+        (Value::Map(_), other) => Err(RtError::boxed("ARG", format!(
             "has: the key must be a string, got {}",
             other.type_name()
-        )),
-        (other, _) => Err(format!(
+        ))),
+        (other, _) => Err(RtError::boxed("ARG", format!(
             "has: expected a map, got {}",
             other.type_name()
-        )),
+        ))),
     }
 }
 
-fn n_assert(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_assert(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if args.is_empty() || args.len() > 2 {
-        return Err(format!(
+        return Err(RtError::boxed("ASSERT", format!(
             "assert: expected 1 or 2 arguments, got {}",
             args.len()
-        ));
+        )));
     }
     match &args[0] {
         Value::Bool(true) => Ok(Value::Null),
         Value::Bool(false) => {
             if args.len() == 2 {
-                Err(format!("assertion failed: {}", args[1].display_string(0)))
+                Err(RtError::boxed("ASSERT", format!("assertion failed: {}", args[1].display_string(0))))
             } else {
-                Err("assertion failed".to_string())
+                Err(RtError::boxed("ASSERT", "assertion failed"))
             }
         }
-        other => Err(format!(
+        other => Err(RtError::boxed("ASSERT", format!(
             "assert: expected a bool, got {}",
             other.type_name()
-        )),
+        ))),
     }
 }
 
 /// Abort with a message: `panic("oops")` raises a runtime error carrying the
 /// text (catchable with `try`/`catch`, fatal otherwise).
-fn n_panic(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_panic(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if args.len() > 1 {
-        return Err(format!("panic: expected 0 or 1 arguments, got {}", args.len()));
+        return Err(RtError::boxed("PANIC", format!("panic: expected 0 or 1 arguments, got {}", args.len())));
     }
     match args.len() {
-        0 => Err("panic".to_string()),
-        _ => Err(args[0].display_string(0)),
+        0 => Err(RtError::boxed("PANIC", "panic")),
+        _ => Err(RtError::boxed("PANIC", args[0].display_string(0))),
     }
+}
+
+/// `error(code, message, detail?)` — build a typed error value for `throw`:
+/// `throw error("PARSE", "bad token", {"pos": 3})`. The value carries
+/// `__error__` so `throw` passes it through unchanged and `e.code`,
+/// `e.message` and `e.detail` are available in `catch` (26.0.10.0).
+fn n_error(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(RtError::boxed("ARG", format!(
+            "error: expected 2 or 3 arguments (code, message, detail?), got {}",
+            args.len()
+        )));
+    }
+    let code = match &args[0] {
+        Value::Str(s) => s.to_string(),
+        other => return Err(RtError::boxed("ARG", format!(
+            "error: the code must be a string, got {}",
+            other.type_name()
+        ))),
+    };
+    let msg = match &args[1] {
+        Value::Str(s) => s.to_string(),
+        other => return Err(RtError::boxed("ARG", format!(
+            "error: the message must be a string, got {}",
+            other.type_name()
+        ))),
+    };
+    let detail = if args.len() == 3 { args[2].clone() } else { Value::Null };
+    Ok(crate::value::error_value(&code, msg, detail))
 }
 
 // ---- string and sequence helpers ------------------------------------------
 
-fn one_string(name: &str, args: &[Value]) -> Result<Rc<str>, String> {
+fn one_string(name: &str, args: &[Value]) -> Result<Rc<str>, Box<RtError>> {
     let v = one_arg(name, args)?;
     match v {
         Value::Str(s) => Ok(s),
-        other => Err(format!("{name}: expected a string, got {}", other.type_name())),
+        other => Err(RtError::boxed("ARG", format!("{name}: expected a string, got {}", other.type_name()))),
     }
 }
 
-fn two_strings(name: &str, args: &[Value]) -> Result<(Rc<str>, Rc<str>), String> {
+fn two_strings(name: &str, args: &[Value]) -> Result<(Rc<str>, Rc<str>), Box<RtError>> {
     if args.len() != 2 {
-        return Err(format!("{name}: expected 2 arguments, got {}", args.len()));
+        return Err(RtError::boxed("ARG", format!("{name}: expected 2 arguments, got {}", args.len())));
     }
     match (&args[0], &args[1]) {
         (Value::Str(a), Value::Str(b)) => Ok((a.clone(), b.clone())),
-        (other, _) => Err(format!("{name}: expected strings, got {}", other.type_name())),
+        (other, _) => Err(RtError::boxed("ARG", format!("{name}: expected strings, got {}", other.type_name()))),
     }
 }
 
-fn n_upper(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_upper(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let s = one_string("upper", &args)?;
     Ok(Value::str(s.to_uppercase()))
 }
 
-fn n_lower(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_lower(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let s = one_string("lower", &args)?;
     Ok(Value::str(s.to_lowercase()))
 }
 
-fn n_trim(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_trim(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let s = one_string("trim", &args)?;
     Ok(Value::str(s.trim()))
 }
 
-fn n_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let (s, sep) = two_strings("split", &args)?;
     if sep.is_empty() {
-        return Err("split: the separator must not be empty".to_string());
+        return Err(RtError::boxed("ARG", "split: the separator must not be empty"));
     }
     let parts: Vec<Value> = s.split(sep.as_ref()).map(Value::str).collect();
     Ok(Value::Array(Rc::new(RefCell::new(parts))))
 }
 
-fn n_join(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_join(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if args.len() != 2 {
-        return Err(format!("join: expected 2 arguments (array, separator), got {}", args.len()));
+        return Err(RtError::boxed("ARG", format!("join: expected 2 arguments (array, separator), got {}", args.len())));
     }
     let sep = match &args[1] {
         Value::Str(s) => s.clone(),
-        other => return Err(format!("join: the separator must be a string, got {}", other.type_name())),
+        other => return Err(RtError::boxed("ARG", format!("join: the separator must be a string, got {}", other.type_name()))),
     };
     match &args[0] {
         Value::Array(a) => {
             let parts: Vec<String> = a.borrow().iter().map(|v| v.display_string(0)).collect();
             Ok(Value::str(parts.join(sep.as_ref())))
         }
-        other => Err(format!("join: expected an array, got {}", other.type_name())),
+        other => Err(RtError::boxed("ARG", format!("join: expected an array, got {}", other.type_name()))),
     }
 }
 
-fn n_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if args.len() != 3 {
-        return Err(format!("replace: expected 3 arguments (string, from, to), got {}", args.len()));
+        return Err(RtError::boxed("ARG", format!("replace: expected 3 arguments (string, from, to), got {}", args.len())));
     }
     let s = match &args[0] {
         Value::Str(s) => s.clone(),
-        other => return Err(format!("replace: expected a string, got {}", other.type_name())),
+        other => return Err(RtError::boxed("ARG", format!("replace: expected a string, got {}", other.type_name()))),
     };
     let (from, to) = match (&args[1], &args[2]) {
         (Value::Str(a), Value::Str(b)) => (a.clone(), b.clone()),
-        (other, _) => return Err(format!("replace: from/to must be strings, got {}", other.type_name())),
+        (other, _) => return Err(RtError::boxed("ARG", format!("replace: from/to must be strings, got {}", other.type_name()))),
     };
     if from.is_empty() {
-        return Err("replace: 'from' must not be empty".to_string());
+        return Err(RtError::boxed("ARG", "replace: 'from' must not be empty"));
     }
     Ok(Value::str(s.replace(from.as_ref(), to.as_ref())))
 }
 
-fn n_contains(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_contains(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     match (&args.get(0), &args.get(1)) {
         (Some(Value::Array(a)), Some(v)) => {
             let found = a.borrow().iter().any(|item| item.equals(v));
@@ -434,27 +464,27 @@ fn n_contains(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
             let (s, sub) = two_strings("contains", &args)?;
             Ok(Value::Bool(s.contains(sub.as_ref())))
         }
-        (Some(other), _) => Err(format!(
+        (Some(other), _) => Err(RtError::boxed("ARG", format!(
             "contains: expected a string or array, got {}",
             other.type_name()
-        )),
-        _ => Err(format!("contains: expected 2 arguments, got {}", args.len())),
+        ))),
+        _ => Err(RtError::boxed("ARG", format!("contains: expected 2 arguments, got {}", args.len()))),
     }
 }
 
-fn n_starts_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_starts_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let (s, prefix) = two_strings("starts_with", &args)?;
     Ok(Value::Bool(s.starts_with(prefix.as_ref())))
 }
 
-fn n_ends_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_ends_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let (s, suffix) = two_strings("ends_with", &args)?;
     Ok(Value::Bool(s.ends_with(suffix.as_ref())))
 }
 
 /// Clamp a Python-style slice index (negatives count from the end) into
 /// `0..=len` for a collection of `len` elements.
-fn clamp_slice_index(i: i64, len: usize, what: &str) -> Result<usize, String> {
+fn clamp_slice_index(i: i64, len: usize, what: &str) -> Result<usize, Box<RtError>> {
     let len = len as i64;
     let i = if i < 0 { i + len } else { i };
     if i < 0 {
@@ -469,13 +499,13 @@ fn clamp_slice_index(i: i64, len: usize, what: &str) -> Result<usize, String> {
 
 /// slice(s, a, b) / slice(arr, a, b): a substring/subarray, `b` exclusive,
 /// negative indices count from the end, out-of-range clamps (Python-style).
-fn n_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if args.len() != 3 {
-        return Err(format!("slice: expected 3 arguments (value, start, end), got {}", args.len()));
+        return Err(RtError::boxed("ARG", format!("slice: expected 3 arguments (value, start, end), got {}", args.len())));
     }
     let (a, b) = match (&args[1], &args[2]) {
         (Value::Int(a), Value::Int(b)) => (*a, *b),
-        (other, _) => return Err(format!("slice: the bounds must be ints, got {}", other.type_name())),
+        (other, _) => return Err(RtError::boxed("ARG", format!("slice: the bounds must be ints, got {}", other.type_name()))),
     };
     match &args[0] {
         Value::Str(s) => {
@@ -491,12 +521,12 @@ fn n_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
             let part: Vec<Value> = items.borrow()[lo..hi].to_vec();
             Ok(Value::Array(Rc::new(RefCell::new(part))))
         }
-        other => Err(format!("slice: expected a string or array, got {}", other.type_name())),
+        other => Err(RtError::boxed("ARG", format!("slice: expected a string or array, got {}", other.type_name()))),
     }
 }
 
 /// find(s, sub): index of the first occurrence, or -1.
-fn n_find(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_find(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let (s, sub) = two_strings("find", &args)?;
     match s.find(sub.as_ref()) {
         Some(byte_pos) => Ok(Value::Int(s[..byte_pos].chars().count() as i64)),
@@ -504,49 +534,49 @@ fn n_find(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     }
 }
 
-fn n_repeat(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_repeat(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     if args.len() != 2 {
-        return Err(format!("repeat: expected 2 arguments, got {}", args.len()));
+        return Err(RtError::boxed("ARG", format!("repeat: expected 2 arguments, got {}", args.len())));
     }
     let s = match &args[0] {
         Value::Str(s) => s.clone(),
-        other => return Err(format!("repeat: expected a string, got {}", other.type_name())),
+        other => return Err(RtError::boxed("ARG", format!("repeat: expected a string, got {}", other.type_name()))),
     };
     let n = match &args[1] {
         Value::Int(i) if *i >= 0 => *i as usize,
-        Value::Int(_) => return Err("repeat: the count must be >= 0".to_string()),
-        other => return Err(format!("repeat: the count must be an int, got {}", other.type_name())),
+        Value::Int(_) => return Err(RtError::boxed("ARG", "repeat: the count must be >= 0")),
+        other => return Err(RtError::boxed("ARG", format!("repeat: the count must be an int, got {}", other.type_name()))),
     };
     if (s.chars().count() as u64) * (n as u64) > 1_000_000 {
-        return Err("repeat: the result would be too large (max 1 000 000 chars)".to_string());
+        return Err(RtError::boxed("ARG", "repeat: the result would be too large (max 1 000 000 chars)"));
     }
     Ok(Value::str(s.repeat(n)))
 }
 
 /// ord(s): the code point of the first character.
-fn n_ord(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_ord(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let s = one_string("ord", &args)?;
     match s.chars().next() {
         Some(c) => Ok(Value::Int(c as i64)),
-        None => Err("ord: the string is empty".to_string()),
+        None => Err(RtError::boxed("ARG", "ord: the string is empty")),
     }
 }
 
 /// chr(i): the character with that code point.
-fn n_chr(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+fn n_chr(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("chr", &args)?;
     match v {
         Value::Int(i) => match u32::try_from(i).ok().and_then(char::from_u32) {
             Some(c) => Ok(Value::str(c.to_string())),
-            None => Err(format!("chr: {i} is not a valid Unicode code point")),
+            None => Err(RtError::boxed("ARG", format!("chr: {i} is not a valid Unicode code point"))),
         },
-        other => Err(format!("chr: expected an int, got {}", other.type_name())),
+        other => Err(RtError::boxed("ARG", format!("chr: expected an int, got {}", other.type_name()))),
     }
 }
 
-fn one_arg(name: &str, args: &[Value]) -> Result<Value, String> {
+fn one_arg(name: &str, args: &[Value]) -> Result<Value, Box<RtError>> {
     if args.len() != 1 {
-        Err(format!("{name}: expected 1 argument, got {}", args.len()))
+        Err(RtError::boxed("ARG", format!("{name}: expected 1 argument, got {}", args.len())))
     } else {
         Ok(args[0].clone())
     }

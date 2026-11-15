@@ -26,6 +26,8 @@ const MAX_UPVALUES: usize = 256;
 const ITER_LOCAL: &str = "%iter";
 const INDEX_LOCAL: &str = "%i";
 const RANGE_END_LOCAL: &str = "%end";
+/// Hidden local holding the error object across a `try`'s catch clauses.
+const ERR_LOCAL: &str = "%err";
 
 struct Local {
     name: String,
@@ -268,6 +270,22 @@ impl Compiler {
             // Pops close any upvalues pointing at these slots.
             let n = n.min(u8::MAX as usize) as u8;
             self.emit_u8(Op::PopN, n, line, col);
+        }
+        self.cur().scope_depth -= 1;
+    }
+
+    /// End the current scope with the stack cleanup emitted explicitly by
+    /// the caller — used by catch clauses, whose matched and guard-failed
+    /// paths each need their own PopN (26.0.10.0).
+    fn drop_clause_locals(&mut self) {
+        let depth = self.cur().scope_depth;
+        while self
+            .cur()
+            .locals
+            .last()
+            .map_or(false, |l| l.depth >= depth)
+        {
+            self.cur().locals.pop();
         }
         self.cur().scope_depth -= 1;
     }
@@ -675,10 +693,12 @@ impl Compiler {
                     self.patch_jump(b, s.line, s.col)?;
                 }
             }
-            StmtKind::Try { body, name, handler } => {
-                // Register a handler, run the body, unregister on success.
-                // On error the VM unwinds to `catch_addr` with the message
-                // on the stack (modeled here as one pending temp).
+            StmtKind::Try { body, clauses } => {
+                // One handler covers the whole clause chain: on error the VM
+                // unwinds here with the error object on the stack (modeled
+                // as one pending temp). Each clause may filter by code or a
+                // `where` condition; when no clause matches, the error is
+                // rethrown unchanged (26.0.10.0).
                 let try_site = self.emit_u16(Op::TryCatch, 0, s.line, s.col);
                 self.cur().try_depth += 1;
                 self.stmt(body)?;
@@ -686,20 +706,85 @@ impl Compiler {
                 self.emit(Op::PopHandler, s.line, s.col);
                 let jend = self.emit_jump(Op::Jump, s.line, s.col)?;
                 self.patch_jump(try_site, s.line, s.col)?;
-                // The unwinder pushed the error message.
+
+                // The unwinder pushed the error object; it lives in a
+                // hidden local for the guards, the bindings and the rethrow.
                 self.push_temp();
                 self.begin_scope();
-                match name {
-                    Some(n) => {
+                let err_slot = self.declare_local(ERR_LOCAL, false, s.line, s.col)?;
+
+                let mut after_jumps = Vec::new();
+                // The fail jump of the previous clause: patched to the next
+                // clause's start (or to the rethrow after the last one).
+                let mut pending_fail: Option<usize> = None;
+                for clause in clauses {
+                    if let Some(j) = pending_fail.take() {
+                        self.patch_jump(j, s.line, s.col)?;
+                    }
+                    self.begin_scope();
+                    // The user binding is a copy of the hidden error local.
+                    let n_binding = if let Some(n) = &clause.name {
+                        self.emit_u8(Op::GetLocal, err_slot, s.line, s.col);
+                        self.push_temp();
                         self.declare_local(n, false, s.line, s.col)?;
+                        1
+                    } else {
+                        0
+                    };
+                    // Optional guard: `code "X"` compiles to err.code == "X"
+                    // (raw emits, not counted in `pending`); `where expr` is
+                    // an ordinary expression over the binding.
+                    let guard_fail = match &clause.guard {
+                        Some(CatchGuard::Code(code)) => {
+                            self.emit_u8(Op::GetLocal, err_slot, s.line, s.col);
+                            let key_ci = self.string_const("code", s.line, s.col)?;
+                            self.emit_u16(Op::Constant, key_ci, s.line, s.col);
+                            self.emit(Op::IndexGet, s.line, s.col);
+                            let v_ci = self.string_const(code, s.line, s.col)?;
+                            self.emit_u16(Op::Constant, v_ci, s.line, s.col);
+                            self.emit(Op::Equal, s.line, s.col);
+                            Some(self.emit_jump(Op::JumpIfFalsePop, s.line, s.col)?)
+                        }
+                        Some(CatchGuard::Where(e)) => {
+                            self.expr(e)?;
+                            let j = self.emit_jump(Op::JumpIfFalsePop, s.line, s.col)?;
+                            self.drop_temps(1);
+                            Some(j)
+                        }
+                        None => None,
+                    };
+                    // The handler body (matched path).
+                    self.stmt(&clause.handler)?;
+                    let succ_j = self.emit_jump(Op::Jump, s.line, s.col)?;
+                    // Guard failed: drop the binding copy, keep %err, try
+                    // the next clause.
+                    if let Some(gf) = guard_fail {
+                        self.patch_jump(gf, s.line, s.col)?;
+                        if n_binding > 0 {
+                            self.emit_u8(Op::PopN, n_binding, s.line, s.col);
+                        }
+                        pending_fail = Some(self.emit_jump(Op::Jump, s.line, s.col)?);
                     }
-                    None => {
-                        self.emit(Op::Pop, s.line, s.col);
-                        self.drop_temps(1);
-                    }
+                    // Matched path: the same cleanup plus the %err cell.
+                    self.patch_jump(succ_j, s.line, s.col)?;
+                    self.emit_u8(Op::PopN, n_binding + 1, s.line, s.col);
+                    // Both runtime paths are done; the compiler-side scope
+                    // bookkeeping closes once (the PopNs above are the
+                    // per-path stack cleanups).
+                    self.drop_clause_locals();
+                    after_jumps.push(self.emit_jump(Op::Jump, s.line, s.col)?);
                 }
-                self.stmt(handler)?;
+                // No clause matched: rethrow the same error object.
+                if let Some(j) = pending_fail {
+                    self.patch_jump(j, s.line, s.col)?;
+                }
+                self.emit_u8(Op::GetLocal, err_slot, s.line, s.col);
+                self.emit(Op::Throw, s.line, s.col);
                 self.end_scope(s.line, s.col);
+
+                for j in after_jumps {
+                    self.patch_jump(j, s.line, s.col)?;
+                }
                 self.patch_jump(jend, s.line, s.col)?;
             }
             StmtKind::Throw(value) => {
@@ -1337,17 +1422,21 @@ impl Compiler {
             self.patch_jump(j, line, col)?;
         }
 
-        // No arm matched: a catchable runtime error via panic().
-        let p_ci = self.string_const("panic", line, col)?;
-        self.emit_u16(Op::GetGlobal, p_ci, line, col);
+        // No arm matched: a catchable error with code NO_ARM (26.0.10.0 —
+        // used to go through panic(), which reported code PANIC).
+        let e_ci = self.string_const("error", line, col)?;
+        self.emit_u16(Op::GetGlobal, e_ci, line, col);
+        self.push_temp();
+        let code_ci = self.string_const("NO_ARM", line, col)?;
+        self.emit_u16(Op::Constant, code_ci, line, col);
         self.push_temp();
         let msg_ci = self.string_const("match: no arm matched the value", line, col)?;
         self.emit_u16(Op::Constant, msg_ci, line, col);
         self.push_temp();
-        self.emit_u8(Op::Call, 1, line, col);
-        self.drop_temps(2);
+        self.emit_u8(Op::Call, 2, line, col);
+        self.drop_temps(3);
         self.push_temp();
-        self.emit(Op::Pop, line, col);
+        self.emit(Op::Throw, line, col);
         self.drop_temps(1);
 
         for j in end_jumps {

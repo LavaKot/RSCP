@@ -58,9 +58,11 @@ in `examples/` and `tests/cases/`.
 * **Batteries included.** Classes with inheritance, modules, `try`/`catch`,
   30+ builtins (`split`, `replace`, `keys`, `assert`, …) and a REPL ship in
   the box — no standard library to install first.
-* **Error messages that help.** Compile errors point at the exact
-  character with the source line; runtime errors carry a full stack trace.
-  No `Segmentation fault` archaeology.
+* **Typed, catchable errors.** Every runtime error is an object with a
+  stable `code` (`DIV_ZERO`, `MISSING_KEY`, …), a message and a structured
+  `detail`; `catch e code "X"` / `catch e where …` filter by code or
+  condition, and unmatched errors rethrow unchanged. Compile errors point
+  at the exact character; uncaught runtime errors carry a full stack trace.
 * **Readable in one evening.** The entire compiler + VM is ~9 000 lines of
   plain, safe Rust with `std` only and no `unsafe` — a textbook
   implementation you can actually study and extend.
@@ -149,7 +151,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.9.0 — enter statements, Ctrl-D to exit.
+rscp 26.0.10.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -165,7 +167,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.9.0.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.10.0.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -290,28 +292,47 @@ and stderr pinned), and the CLI surface itself. The 12 showcase examples in
 
 RSCP versions are four numbers: **`YY.0.MINOR.PATCH`** (until 26.0.7.0 the
 scheme was `YEAR.MAJOR.MINOR.PATCH` — `2026.6.0.0` — and the minor counter
-carries over; this is feature release #9).
+carries over; this is feature release #10).
 
 | Number | Counts what | Example |
 |--------|-------------|---------|
 | 1st | year, short form (26 = 2026) | `26` |
 | 2nd | `0` while RSCP is in beta, `1` from the first stable release | `0` |
-| 3rd | feature releases — one number per shipped feature set | `9` |
+| 3rd | feature releases — one number per shipped feature set | `10` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So this release is `26.0.9.0` (`v26.0.9.0`); a hotfix on top of it would be
-`26.0.9.1`, and the next feature release `26.0.10.0`. While the second
+So this release is `26.0.10.0` (`v26.0.10.0`); a hotfix on top of it would
+be `26.0.10.1`, and the next feature release `26.0.11.0`. While the second
 number is `0`, GitHub releases are titled **"Beta …"** (e.g. "Beta
-26.0.9.0"); from the first stable release the prefix disappears.
+26.0.10.0"); from the first stable release the prefix disappears.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`26.0.9` in this release). The full four-number version lives in
+(`26.0.10` in this release). The full four-number version lives in
 `rscp version`, the REPL banner, release tags, release file names and this
 README.
 
 ## Changelog
 
+* **26.0.10.0** — typed errors. Every runtime error now carries a stable
+  machine-readable **code** (`DIV_ZERO`, `IDX_RANGE`, `MISSING_KEY`,
+  `UNDEFINED_VAR`, `ARITY`, `TYPE`, `ASSERT`, `PANIC`, `NO_ARM`, `USER`,
+  … — the full table is in the docs), and the `catch` binding became an
+  **error object**: `e.code`, `e.message` and a structured `e.detail`
+  (`try { [1][9] } catch e { e.detail.length }`). `print(e)` still shows
+  just the message, so existing programs keep their output. **Selective
+  catch**: a `try` may carry several clauses — `catch e code "DIV_ZERO" { }`
+  matches one code, `catch e where e.code != "X" { }` filters by any
+  condition — and when all clauses decline, the original error is rethrown
+  unchanged. New `error(code, message, detail?)` builtin builds typed
+  errors for `throw`; `throw e` of an existing error object preserves it
+  (codes and custom fields survive); a thrown map may carry its own
+  `code`/`message`. `match` with no matching arm now reports code `NO_ARM`
+  instead of `PANIC`. Under the hood: helpers and builtins return a boxed
+  `RtError`, and the cold paths (throw, arity raises, class construction)
+  moved out of the dispatch loop — the suite is a net **1.01× faster** than
+  26.0.9.0 (loops 1.06×, globals/arrays 1.02×; map-heavy writes −7%).
+  67 unit tests, 105 golden cases.
 * **26.0.9.0** — the speed release: **1.89× faster on average (geometric
   mean), up to 4.8× on printing** — see the new Performance section for the
   full table. No new syntax: the same programs run faster. Global and map

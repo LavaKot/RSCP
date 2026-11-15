@@ -229,14 +229,16 @@ pub enum StmtKind {
         parent: Option<String>,
         methods: Vec<(String, FuncLit)>,
     },
-    /// `try { body } catch e { handler }` — runtime errors in `body` jump to
-    /// `handler` with the message bound to `name` (or unnamed).
+    /// `try { body } catch ... { handler }` — runtime errors in `body` jump
+    /// to the first clause whose guard accepts them; the error object
+    /// (a map with `code`/`message`/`detail`) is bound to the clause name.
+    /// When no clause matches, the error is rethrown unchanged (26.0.10.0).
     Try {
         body: Box<Stmt>,
-        name: Option<String>,
-        handler: Box<Stmt>,
+        clauses: Vec<CatchClause>,
     },
-    /// `throw expr` — raise a runtime error carrying the value's text.
+    /// `throw expr` — raise a typed error: error objects travel unchanged,
+    /// maps may carry `code`/`message`, everything else becomes code "USER".
     Throw(Expr),
     /// `import "path.rscp" [as name]` — run the module at this point and
     /// bind its exported top-level names as an immutable map.
@@ -244,6 +246,26 @@ pub enum StmtKind {
     Return(Option<Expr>),
     Break,
     Continue,
+}
+
+/// One `catch` clause of a `try` statement (26.0.10.0).
+#[derive(Debug, Clone)]
+pub struct CatchClause {
+    /// The local that receives the error object (None for `catch { }`).
+    pub name: Option<String>,
+    /// `catch e code "DIV_ZERO"` or `catch e where e.code == "..."`.
+    pub guard: Option<CatchGuard>,
+    /// The handler block.
+    pub handler: Box<Stmt>,
+}
+
+/// The filter of a `catch` clause.
+#[derive(Debug, Clone)]
+pub enum CatchGuard {
+    /// `code "X"` — the error's code must equal this string.
+    Code(String),
+    /// `where expr` — the expression must evaluate to true.
+    Where(Expr),
 }
 
 impl Stmt {

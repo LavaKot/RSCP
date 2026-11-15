@@ -577,8 +577,12 @@ impl Parser {
         ))
     }
 
-    /// `try { body } catch e { handler }` — `catch` may sit on its own line
-    /// after the body (semicolon insertion never fires before it).
+    /// `try { body } catch ... { handler }` — `catch` may sit on its own
+    /// line after the body (semicolon insertion never fires before it).
+    /// Since 26.0.10.0 a try carries one or more catch clauses, each with an
+    /// optional guard: `catch e code "DIV_ZERO" { }` or
+    /// `catch e where e.detail.idx < 0 { }`. `code` and `where` are
+    /// contextual keywords — they are only special right here.
     fn try_statement(&mut self) -> PResult<Stmt> {
         let kw = self.advance(); // try
         if !self.check(TokenType::LBrace) {
@@ -587,16 +591,74 @@ impl Parser {
         let body = Box::new(self.block_statement()?);
         while self.match_ty(TokenType::Semicolon).is_some() {}
         self.expect(TokenType::Catch, "'catch' after the 'try' block")?;
-        let name = if self.check(TokenType::Ident) {
-            Some(self.advance().lexeme.clone())
-        } else {
-            None
-        };
-        if !self.check(TokenType::LBrace) {
-            return Err(self.error_here("'{' to open the 'catch' body (braces are required)"));
+
+        let mut clauses = Vec::new();
+        loop {
+            while self.match_ty(TokenType::Semicolon).is_some() {}
+            let name = if self.check(TokenType::Ident) && !self.guard_keyword_ahead() {
+                Some(self.advance().lexeme.clone())
+            } else {
+                None
+            };
+            let guard = self.catch_guard(name.is_some())?;
+            if !self.check(TokenType::LBrace) {
+                return Err(self.error_here("'{' to open the 'catch' body (braces are required)"));
+            }
+            let handler = Box::new(self.block_statement()?);
+            clauses.push(CatchClause { name, guard, handler });
+            // another `catch` clause may follow on the same or the next line
+            while self.match_ty(TokenType::Semicolon).is_some() {}
+            if !self.check(TokenType::Catch) {
+                break;
+            }
+            self.advance();
         }
-        let handler = Box::new(self.block_statement()?);
-        Ok(Stmt::new(StmtKind::Try { body, name, handler }, kw.line, kw.col))
+        Ok(Stmt::new(StmtKind::Try { body, clauses }, kw.line, kw.col))
+    }
+
+    /// True when the upcoming `code`/`where` starts a catch guard rather
+    /// than a binding name (`code` only when a string literal follows).
+    fn guard_keyword_ahead(&self) -> bool {
+        if !self.check(TokenType::Ident) {
+            return false;
+        }
+        let lex = self.peek().lexeme.as_str();
+        if lex == "where" {
+            return true;
+        }
+        lex == "code" && self.peek_at(1).ty == TokenType::Str
+    }
+
+    /// The optional filter after `catch [name]`: `code "X"` or `where expr`.
+    /// `code`/`where` are contextual: `code` only counts when a string
+    /// literal follows it.
+    fn catch_guard(&mut self, has_name: bool) -> PResult<Option<CatchGuard>> {
+        if self.check(TokenType::Ident) && self.peek().lexeme == "code" {
+            if self.peek_at(1).ty == TokenType::Str {
+                self.advance(); // the contextual `code`
+                let s = self.expect(TokenType::Str, "the error code string")?;
+                return match s.lit {
+                    Some(Lit::Str(code)) => Ok(Some(CatchGuard::Code(code))),
+                    _ => Err(self.error_here("internal error: string token without a literal")),
+                };
+            }
+            if has_name {
+                return Err(self.error_here(
+                    "'code' must be followed by an error-code string literal",
+                ));
+            }
+        }
+        if self.check(TokenType::Ident) && self.peek().lexeme == "where" {
+            if !has_name {
+                return Err(self.error_here(
+                    "'catch where' needs a binding: write 'catch e where ...'",
+                ));
+            }
+            self.advance(); // the contextual `where`
+            let e = self.expression()?;
+            return Ok(Some(CatchGuard::Where(e)));
+        }
+        Ok(None)
     }
 
     /// `import "file.rscp"` — bind the module's exports to the file stem,
@@ -1824,11 +1886,28 @@ fn f(
     #[test]
     fn try_catch_shapes() {
         let stmts = parse("try { risky() } catch e { println(e) }");
-        assert!(matches!(&stmts[0].kind, StmtKind::Try { name: Some(n), .. } if n == "e"));
+        assert!(matches!(&stmts[0].kind,
+            StmtKind::Try { clauses, .. }
+            if clauses.len() == 1
+                && clauses[0].name.as_deref() == Some("e")
+                && clauses[0].guard.is_none()));
         // Unnamed catch; `catch` on its own line; `throw` with an expression.
         let stmts = parse("try {\n    a()\n}\ncatch { b() }\nthrow \"boom\"");
-        assert!(matches!(&stmts[0].kind, StmtKind::Try { name: None, .. }));
+        assert!(matches!(&stmts[0].kind,
+            StmtKind::Try { clauses, .. }
+            if clauses.len() == 1 && clauses[0].name.is_none()));
         assert!(matches!(&stmts[1].kind, StmtKind::Throw(_)));
+        // Guards and multiple clauses (26.0.10.0).
+        let stmts = parse(
+            "try { risky() } catch e code \"DIV_ZERO\" { a() } catch e where e.code == \"X\" { b() } catch { c() }",
+        );
+        assert!(matches!(&stmts[0].kind,
+            StmtKind::Try { clauses, .. }
+            if clauses.len() == 3
+                && matches!(&clauses[0].guard, Some(CatchGuard::Code(c)) if c == "DIV_ZERO")
+                && matches!(&clauses[1].guard, Some(CatchGuard::Where(_)))
+                && clauses[2].guard.is_none()
+                && clauses[2].name.is_none()));
         // try inside functions and loops parses.
         let stmts = parse("fn f() { try { return 1 } catch { return 2 } }\nfor i in 0..3 { try { continue } catch e { } }");
         assert_eq!(stmts.len(), 2);

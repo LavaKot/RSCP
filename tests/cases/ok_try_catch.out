@@ -6,3 +6,9 @@ wrapped: division by zero
 outer saw inner
 [0, 1, 3]
 X
+DIV_ZERO DIV_ZERO MISSING_KEY IDX_RANGE:9 UNDEFINED_VAR ARG ASSERT PANIC NO_ARM USER MY_CODE/custom map throw BUILT/7
+25
+div0
+type
+type
+rethrown DIV_ZERO
