@@ -45,6 +45,10 @@ struct FnCtx {
     locals: Vec<Local>,
     scope_depth: usize,
     is_script: bool,
+    /// True only while compiling the direct body of a class method;
+    /// `super` is rejected anywhere deeper (nested fn or closure), where
+    /// the running frame has no `self` slot (26.0.12.10).
+    is_method: bool,
     /// How many `try` blocks are open in this function right now; `return`
     /// and loop exits must unregister their handlers.
     try_depth: usize,
@@ -109,6 +113,7 @@ fn compile_in_chain(
             }],
             scope_depth: 0,
             is_script: true,
+            is_method: false,
             try_depth: 0,
             pending: 0,
         }],
@@ -493,7 +498,7 @@ impl Compiler {
                 }
             }
             StmtKind::Fn { name, func } => {
-                let ci = self.function(func, Some(name))?;
+                let ci = self.function(func, Some(name), false)?;
                 self.emit_closure(ci, s.line, s.col)?;
                 self.push_temp();
                 if self.at_top_level() {
@@ -599,7 +604,7 @@ impl Compiler {
                     self.emit_u16(Op::Constant, ki, s.line, s.col);
                     let mut lit = m.clone();
                     lit.params.insert(0, "self".to_string());
-                    let ci = self.function(&lit, Some(mname))?;
+                    let ci = self.function(&lit, Some(mname), true)?;
                     self.emit_closure(ci, s.line, s.col)?;
                 }
                 self.method_check = saved_check;
@@ -1390,6 +1395,16 @@ impl Compiler {
                 }
                 // super.name(args) — the parent's method with self bound.
                 if let ExprKind::Super(name) = &callee.kind {
+                    if !self.fns.last().map_or(false, |f| f.is_method) {
+                        return Err(self.err(
+                            format!(
+                                "super.{name}(...) can only be called directly inside a method \
+                                 (not inside a nested fn or closure)"
+                            ),
+                            e.line,
+                            e.col,
+                        ));
+                    }
                     let ni = self.string_const(name, e.line, e.col)?;
                     self.emit_u16(Op::SuperMethod, ni, e.line, e.col);
                     self.push_temp();
@@ -1486,7 +1501,7 @@ impl Compiler {
                 self.push_temp();
             }
             ExprKind::Func(lit) => {
-                let ci = self.function(lit, None)?;
+                let ci = self.function(lit, None, false)?;
                 self.emit_closure(ci, e.line, e.col)?;
                 self.push_temp();
             }
@@ -2008,7 +2023,7 @@ fn same_fields(a: &[VariantField], b: &[VariantField]) -> bool {
         Ok(())
     }
 
-    fn function(&mut self, lit: &FuncLit, name: Option<&str>) -> Result<u16, RscpError> {
+    fn function(&mut self, lit: &FuncLit, name: Option<&str>, is_method: bool) -> Result<u16, RscpError> {
         let (line, col) = (lit.line, lit.col);
         if lit.params.len() > u8::MAX as usize {
             return Err(self.err(format!("too many parameters (max is {})", u8::MAX), line, col));
@@ -2029,6 +2044,7 @@ fn same_fields(a: &[VariantField], b: &[VariantField]) -> bool {
             }],
             scope_depth: 1,
             is_script: false,
+            is_method,
             try_depth: 0,
             pending: 0,
         };

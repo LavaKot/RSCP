@@ -1,0 +1,9 @@
+# super outside the direct body of a method is a compile error
+# (26.0.12.10): inside a nested fn or closure the running frame has no
+# self slot, and the VM used to panic on it.
+class P { fn hi() -> "p" }
+class C(P) {
+  fn via_closure() { var f = || super.hi() ; return f() }
+  fn via_nested_fn() { fn g() -> super.hi() ; return g() }
+}
+println(C().hi())

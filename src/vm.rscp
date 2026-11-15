@@ -1083,7 +1083,10 @@ impl Vm {
                         let frame = self.frames.last().unwrap();
                         let base = frame.base;
                         let running = Rc::clone(&frame.func);
-                        let this = self.stack[base + 1].clone();
+                        let this = match self.stack.get(base + 1) {
+                            Some(v) => v.clone(),
+                            None => rtc!(op_ip, "TYPE", "super can only be used inside a method"),
+                        };
                         let parent = match &this {
                             Value::Map(m) => {
                                 let class = m.borrow().get("__class__").and_then(|c| match c {

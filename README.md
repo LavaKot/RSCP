@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.9 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.10 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.9.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.10.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,7 +304,7 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So the current release is `26.0.12.3` (`v26.0.12.9`); a hotfix on top of
+So the current release is `26.0.12.3` (`v26.0.12.10`); a hotfix on top of
 it would be `26.0.12.4`, and the next feature release `26.0.13.0`. While
 the second number is `0`, GitHub releases are titled **"Beta …"** (e.g.
 "Beta 26.0.12.3"); from the first stable release the prefix disappears.
@@ -318,6 +318,12 @@ README.
 
 ## Changelog
 
+* **26.0.12.10** — `super.name(...)` inside a nested fn or closure used to
+  panic the VM ("index out of bounds": the closure's frame has no `self`
+  slot). It is a compile error now — "super.x(...) can only be called
+  directly inside a method (not inside a nested fn or closure)" — and the
+  VM opcode reads its `self` slot defensively, so no path can reach the
+  panic anymore. Found by `scripts/recon.py` (battery 7).
 * **26.0.12.9** — a leading UTF-8 BOM is stripped before tokenizing.
   Windows editors (Notepad, some PowerShell redirections) prepend
   `EF BB BF` to saved scripts; until now that was a lexical error on
