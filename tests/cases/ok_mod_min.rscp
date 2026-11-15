@@ -1,0 +1,9 @@
+# i64::MIN % -1 is mathematically 0 (26.0.12.17): the checked_rem of
+# Rust reports that pair as overflow, but every other language returns 0.
+var m = 0 - 9223372036854775807 - 1
+println(m % -1)
+m %= -1
+println(m)
+println(m % 1, 100 % 7, -100 % 7, 100 % -7)
+# MIN / -1 still raises: the result, 2^63, does not fit in i64.
+try { println(m / -1) } catch e { println(e.code) }

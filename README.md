@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.16 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.17 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.16.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.17.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,7 +304,7 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So the current release is `26.0.12.3` (`v26.0.12.16`); a hotfix on top of
+So the current release is `26.0.12.3` (`v26.0.12.17`); a hotfix on top of
 it would be `26.0.12.4`, and the next feature release `26.0.13.0`. While
 the second number is `0`, GitHub releases are titled **"Beta …"** (e.g.
 "Beta 26.0.12.3"); from the first stable release the prefix disappears.
@@ -318,6 +318,13 @@ README.
 
 ## Changelog
 
+* **26.0.12.17** — `i64::MIN % -1` returns 0 instead of raising
+  INT_OVERFLOW. The result is mathematically 0 and every other language
+  returns it; Rust's `checked_rem` just reports the pair as overflow, and
+  RSCP inherited that. `MIN / -1` still raises (the result, 2^63, does
+  not fit). Found by `scripts/recon10.py`, the Python-computed semantic
+  oracle (~4000 integer cases, float round-trips, unicode string
+  methods — all matching now).
 * **26.0.12.16** — `for x in …` really is "a fresh binding each
   iteration", as the README has promised since 2026.2.0.0. Closures
   created inside the loop used to share one cell and all saw the LAST

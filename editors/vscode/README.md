@@ -1,6 +1,6 @@
 # RSCP для VS Code
 
-Официальное расширение языка RSCP 26.0.12.16: подсветка синтаксиса (включая новые
+Официальное расширение языка RSCP 26.0.12.17: подсветка синтаксиса (включая новые
 диапазоны `0..n`, короткие замыкания `|x| x` и стрелочные функции `->`),
 сниппеты, автозакрытие скобок и кавычек, комментарии по `Ctrl+/`, автосдвиг
 от `{ }`. Работает в VS Code, VSCodium, Cursor и других редакторах на базе
@@ -8,15 +8,15 @@ VS Code.
 
 ## Установка — способ 1, готовый пакет `.vsix` (рекомендуется)
 
-В дистрибутиве уже лежит собранный пакет `rscp-26.0.12.16.vsix` (рядом с этим
+В дистрибутиве уже лежит собранный пакет `rscp-26.0.12.17.vsix` (рядом с этим
 файлом). Установите его одной командой:
 
 ```sh
-code --install-extension rscp-26.0.12.16.vsix
+code --install-extension rscp-26.0.12.17.vsix
 ```
 
-- **VSCodium:** `codium --install-extension rscp-26.0.12.16.vsix`
-- **Cursor:** `cursor --install-extension rscp-26.0.12.16.vsix`
+- **VSCodium:** `codium --install-extension rscp-26.0.12.17.vsix`
+- **Cursor:** `cursor --install-extension rscp-26.0.12.17.vsix`
 - **Через интерфейс:** Extensions (`Ctrl+Shift+X`) → `…` → *Install from
   VSIX…* → выбрать файл.
 
@@ -26,8 +26,8 @@ code --install-extension rscp-26.0.12.16.vsix
 ## Установка — способ 2, вручную из папки
 
 1. Скопируйте папку `editors/vscode` целиком в
-   `%USERPROFILE%\.vscode\extensions\rscp-26.0.12.16`
-   (Linux/macOS: `~/.vscode/extensions/rscp-26.0.12.16`).
+   `%USERPROFILE%\.vscode\extensions\rscp-26.0.12.17`
+   (Linux/macOS: `~/.vscode/extensions/rscp-26.0.12.17`).
 2. Перезапустите VS Code.
 
 ## Установка — способ 3, без расширения (одна строка настроек)

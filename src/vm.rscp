@@ -1721,7 +1721,14 @@ fn int_arith(op: Op, a: i64, b: i64) -> Result<i64, Box<RtError>> {
             if b == 0 {
                 return Err(RtError::boxed("DIV_ZERO", "modulo by zero"));
             }
-            a.checked_rem(b)
+            // i64::MIN % -1 is mathematically 0, but Rust's checked_rem
+            // reports it as overflow; every other language returns 0
+            // (26.0.12.17).
+            if a == i64::MIN && b == -1 {
+                Some(0)
+            } else {
+                a.checked_rem(b)
+            }
         }
     };
     r.ok_or_else(|| RtError::boxed("INT_OVERFLOW", format!("integer overflow in '{}'", arith_symbol(op))))
