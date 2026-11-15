@@ -17,7 +17,9 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::process::{exit, Command};
+use std::process::exit;
+#[cfg(windows)]
+use std::process::Command;
 
 use ast::{Expr, ExprKind, Stmt, StmtKind};
 use bytecode::disassemble_proto;
@@ -28,7 +30,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "2026.2.1.0";
+const VERSION: &str = "2026.2.1.1";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -198,35 +200,47 @@ fn report_error(e: RscpError, path: &str, source: &str) -> i32 {
 /// dependencies (the repo itself is private, so the script also reads the
 /// user's GitHub token from %USERPROFILE%\.rscp\token).
 fn update() -> i32 {
-    let exe = match env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: cannot locate the running rscp executable: {e}");
+    // Windows-only by design: the updater drives PowerShell and replaces the
+    // installed rscp.exe. Everywhere else the update path is a rebuild from
+    // source, so fail fast and deterministically instead of hunting for a
+    // PowerShell that some Linux/macOS machines happen to have.
+    #[cfg(not(windows))]
+    {
+        eprintln!("error: 'rscp update' supports Windows; on Linux/macOS rebuild from source");
+        70
+    }
+    #[cfg(windows)]
+    {
+        let exe = match env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: cannot locate the running rscp executable: {e}");
+                return 70;
+            }
+        };
+        // PowerShell 5.1 only reads UTF-8 scripts with a BOM (the script
+        // prints Russian text), so prepend one when writing it out.
+        let script = format!("\u{feff}{}", include_str!("update.ps1"));
+        let ps1 = env::temp_dir().join("rscp-update.ps1");
+        if let Err(e) = fs::write(&ps1, script) {
+            eprintln!("error: cannot write {}: {e}", ps1.display());
             return 70;
         }
-    };
-    // PowerShell 5.1 only reads UTF-8 scripts with a BOM (the script prints
-    // Russian text), so prepend one when writing it out.
-    let script = format!("\u{feff}{}", include_str!("update.ps1"));
-    let ps1 = env::temp_dir().join("rscp-update.ps1");
-    if let Err(e) = fs::write(&ps1, script) {
-        eprintln!("error: cannot write {}: {e}", ps1.display());
-        return 70;
-    }
-    let status = Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(&ps1)
-        .arg("-ExePath")
-        .arg(&exe)
-        .arg("-Version")
-        .arg(VERSION)
-        .status();
-    match status {
-        Ok(s) if s.success() => 0,
-        Ok(s) => s.code().unwrap_or(70),
-        Err(_) => {
-            eprintln!("error: PowerShell not found — 'rscp update' needs Windows");
-            70
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&ps1)
+            .arg("-ExePath")
+            .arg(&exe)
+            .arg("-Version")
+            .arg(VERSION)
+            .status();
+        match status {
+            Ok(s) if s.success() => 0,
+            Ok(s) => s.code().unwrap_or(70),
+            Err(_) => {
+                eprintln!("error: PowerShell not found — 'rscp update' needs Windows PowerShell");
+                70
+            }
         }
     }
 }

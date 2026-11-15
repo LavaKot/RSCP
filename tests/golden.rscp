@@ -180,10 +180,10 @@ fn cli_surface() {
 #[test]
 #[cfg(unix)]
 fn cli_update_needs_windows() {
-    // There is no PowerShell on unix, so `rscp update` must fail cleanly
-    // with the explanatory message (exit 70) instead of panicking. On
-    // Windows the command actually performs the self-update.
+    // The self-updater targets Windows (it drives PowerShell); on unix it
+    // must fail fast and cleanly with exit 70 instead of panicking or
+    // hunting for a PowerShell that some machines happen to have.
     let out = Command::new(bin()).arg("update").output().unwrap();
     assert_eq!(out.status.code(), Some(70));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("PowerShell not found"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("supports Windows"));
 }

@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.2.1.0 — enter statements, Ctrl-D to exit.
+rscp 2026.2.1.1 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.2.1.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.2.1.1.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -580,12 +580,17 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
 (`2026.2.1` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.2.1.0`), release
+`rscp version`, the REPL banner, release tags (`v2026.2.1.1`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.2.1.1** — patch: `rscp update` is now Windows-only by design and
+  fails fast on Linux/macOS instead of hunting for a PowerShell that some
+  machines happen to have; golden-test expectations are CRLF-normalized
+  and `.gitattributes` keeps the repo LF, so the test suite is green on
+  Windows checkouts too (CI runs on Linux, Windows and macOS).
 * **2026.2.1.0** — `rscp update`: self-update from GitHub releases. It
   downloads the latest Windows build, swaps `rscp.exe` in place (the
   running copy is renamed, then replaced; the leftover is cleaned on the
