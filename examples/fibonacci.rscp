@@ -1,0 +1,22 @@
+// Fibonacci three ways: recursion, an arrow function, and a loop.
+fn fib(n) -> n < 2 ? n : fib(n - 1) + fib(n - 2)
+
+fn fibIter(n) {
+    var a = 0
+    var b = 1
+    for _unused in 0..n {
+        let t = a + b
+        a = b
+        b = t
+    }
+    return a
+}
+
+for i in 0..12 { print(fib(i), " ") }
+println()
+println("fib(28)     =", fib(28))
+println("fibIter(90) =", fibIter(90))
+
+let t0 = clock()
+fib(26)
+println("fib(26) took ", clock() - t0, " seconds")

@@ -1,0 +1,23 @@
+fn each(arr, f) { for (let x in arr) { f(x); } }
+fn map(arr, f) {
+    var out = [];
+    for (let x in arr) { push(out, f(x)); }
+    return out;
+}
+fn filter(arr, pred) {
+    var out = [];
+    for (let x in arr) { if (pred(x)) { push(out, x); } }
+    return out;
+}
+fn reduce(arr, init, f) {
+    var acc = init;
+    for (let x in arr) { acc = f(acc, x); }
+    return acc;
+}
+
+let xs = [1, 2, 3, 4, 5, 6];
+println(filter(xs, fn(x) { return x % 2 == 0; }));
+println(map(xs, fn(x) { return x * x; }));
+println(reduce(xs, 0, fn(a, b) { return a + b; }));
+each(["a", "b"], fn(s) { print(s); print("-"); });
+println();

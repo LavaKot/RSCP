@@ -1,0 +1,11 @@
+println(abs(-5), abs(5), abs(-2.5));
+println(min(3, 7), max(3, 7));
+println(min(2, 2.5), max(1.5, 1));
+println(sqrt(16.0), sqrt(2));
+println(pow(2, 10), pow(2.0, 0.5));
+println(int(3.99), int(-3.99), int("42"));
+println(float(7), float("2.5"));
+println(type(1), type(1.0), type("x"), type(true), type(null), type([]), type({}), type(print));
+var r = rand();
+println(r >= 0.0 && r < 1.0);
+println(clock() > 0.0);

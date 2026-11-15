@@ -1,0 +1,20 @@
+// Exclusive and inclusive ranges; the loop variable is a fresh binding.
+var sum1 = 0
+for i in 1..5 { sum1 += i }        // 1+2+3+4
+var sum2 = 0
+for i in 1..=5 { sum2 += i }       // 1+2+3+4+5
+var sum3 = 0
+for i in 0..=0 { sum3 += i }       // one iteration
+println(sum1, sum2, sum3)
+
+// Ranges with computed ends bind tightly: 0 .. (n-1)
+var n = 4
+var count = 0
+for i in 0..n - 1 { count++ }
+println(count)
+
+// Empty range runs zero times.
+var seen = 0
+for i in 5..5 { seen++ }
+for i in 5..1 { seen++ }
+println(seen)

@@ -1,0 +1,4 @@
+println("top level runs first");
+fn main() {
+    println("then main() is called");
+}

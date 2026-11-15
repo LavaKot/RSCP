@@ -1,0 +1,282 @@
+//! rscp — the RSCP language compiler and virtual machine.
+//!
+//! Pipeline: lexer -> parser -> compiler -> bytecode VM (see the README for
+//! the full architecture tour).
+
+#[path = "errors.rscp"] mod errors;
+#[path = "token.rscp"] mod token;
+#[path = "lexer.rscp"] mod lexer;
+#[path = "ast.rscp"] mod ast;
+#[path = "parser.rscp"] mod parser;
+#[path = "value.rscp"] mod value;
+#[path = "bytecode.rscp"] mod bytecode;
+#[path = "compiler.rscp"] mod compiler;
+#[path = "vm.rscp"] mod vm;
+#[path = "builtins.rscp"] mod builtins;
+
+use std::env;
+use std::fs;
+use std::io::{self, Write};
+use std::process::exit;
+
+use ast::{Expr, ExprKind, Stmt, StmtKind};
+use bytecode::disassemble_proto;
+use compiler::compile;
+use errors::RscpError;
+use lexer::Lexer;
+use parser::Parser;
+use std::rc::Rc;
+use vm::Vm;
+
+const VERSION: &str = "2026.2.0.0";
+
+const USAGE: &str = "\
+rscp — the RSCP programming language (light like Python, shaped like Rust)
+
+USAGE:
+    rscp <file.rscp>          run a program
+    rscp run <file.rscp>      run a program
+    rscp repl                 interactive session (Ctrl-D to exit)
+    rscp disasm <file.rscp>   show compiled bytecode
+    rscp tokens <file.rscp>   dump the token stream
+    rscp ast <file.rscp>      dump the parse tree
+    rscp version              print the version
+    rscp help                 show this help
+
+LANGUAGE (2026.2.0.0 light syntax):
+    var total = 0             // no ';' needed at line ends
+    for i in 0..10 { ... }    // ranges, no parentheses
+    if total > 5 { ... }      // braces required, no parens
+    loop { break }            // infinite loop
+    let double = |x| x * 2    // short closures
+    fn square(x) -> x * x     // arrow function body
+
+BUILT-INS:
+    print println len str int float type abs min max sqrt pow rand clock
+    push pop keys has assert
+
+EXIT CODES:
+    0   success
+    64  bad usage
+    65  lexical / syntax / compile error
+    66  cannot read the input file
+    70  runtime error
+";
+
+fn main() {
+    // Rust ignores SIGPIPE, so a closed stdout (e.g. `rscp big.rscp | head`)
+    // would panic inside println!. Exit quietly with 141 (128+SIGPIPE)
+    // like a well-behaved filter instead.
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.to_string();
+        if msg.contains("Broken pipe") || msg.contains("failed printing to stdout") {
+            exit(141);
+        }
+        eprintln!("{msg}");
+    }));
+    let args: Vec<String> = env::args().skip(1).collect();
+    exit(run_cli(&args));
+}
+
+fn run_cli(args: &[String]) -> i32 {
+    match args.first().map(|s| s.as_str()) {
+        None => {
+            eprint!("{USAGE}");
+            64
+        }
+        Some("help") | Some("--help") | Some("-h") => {
+            print!("{USAGE}");
+            0
+        }
+        Some("version") | Some("--version") | Some("-V") => {
+            println!("rscp {VERSION} (bytecode compiler + stack VM, written in Rust)");
+            0
+        }
+        Some("repl") => repl(),
+        Some(cmd @ ("run" | "tokens" | "ast" | "disasm")) => {
+            let path = match args.get(1) {
+                Some(p) => p,
+                None => {
+                    eprintln!("error: 'rscp {cmd}' needs a file argument");
+                    eprint!("{USAGE}");
+                    return 64;
+                }
+            };
+            file_command(cmd, path)
+        }
+        Some(other) => {
+            if other.ends_with(".rscp") {
+                file_command("run", other)
+            } else {
+                eprintln!("error: unknown command '{other}'");
+                eprint!("{USAGE}");
+                64
+            }
+        }
+    }
+}
+
+fn file_command(cmd: &str, path: &str) -> i32 {
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{path}': {e}");
+            return 66;
+        }
+    };
+
+    match cmd {
+        "tokens" => {
+            let tokens = match Lexer::new(&source).tokenize() {
+                Ok(t) => t,
+                Err(e) => return report_error(e, path, &source),
+            };
+            for t in tokens {
+                let lit = match &t.lit {
+                    Some(l) => format!("  {l:?}"),
+                    None => String::new(),
+                };
+                println!("{:>4}:{:<3} {:<14} {:<10}{}", t.line, t.col, format!("{:?}", t.ty), t.lexeme, lit);
+            }
+            0
+        }
+        "ast" => {
+            let tokens = match Lexer::new(&source).tokenize() {
+                Ok(t) => t,
+                Err(e) => return report_error(e, path, &source),
+            };
+            let program = match Parser::new(tokens).parse() {
+                Ok(p) => p,
+                Err(e) => return report_error(e, path, &source),
+            };
+            println!("{program:#?}");
+            0
+        }
+        "disasm" => {
+            let proto = match compile_source(&source) {
+                Ok(p) => p,
+                Err(e) => return report_error(e, path, &source),
+            };
+            print!("{}", disassemble_proto(&proto));
+            0
+        }
+        _ => {
+            // "run"
+            let proto = match compile_source(&source) {
+                Ok(p) => p,
+                Err(e) => return report_error(e, path, &source),
+            };
+            let mut vm = Vm::new();
+            match vm.run_script(proto) {
+                Ok(()) => 0,
+                Err(e) => report_error(e, path, &source),
+            }
+        }
+    }
+}
+
+/// Full pipeline up to a compiled script prototype.
+fn compile_source(source: &str) -> Result<Rc<bytecode::FnProto>, RscpError> {
+    let tokens = Lexer::new(source).tokenize()?;
+    let program = Parser::new(tokens).parse()?;
+    compile(&program)
+}
+
+fn report_error(e: RscpError, path: &str, source: &str) -> i32 {
+    eprint!("{}", errors::render(&e, path, source));
+    e.exit_code()
+}
+
+/// Interactive session. Globals persist across lines; a line that is a bare
+/// expression has its value printed. Parse errors at end of input continue
+/// onto the next line so functions and blocks can be entered across lines.
+fn repl() -> i32 {
+    let mut vm = Vm::new();
+    vm.repl = true;
+    println!("rscp {VERSION} — enter statements, Ctrl-D to exit.");
+    let stdin = io::stdin();
+    let mut buf = String::new();
+    loop {
+        let prompt = if buf.is_empty() { "rscp> " } else { "....> " };
+        print!("{prompt}");
+        let _ = io::stdout().flush();
+
+        let mut line = String::new();
+        match stdin.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => buf.push_str(&line),
+            Err(e) => {
+                eprintln!("error: cannot read input: {e}");
+                break;
+            }
+        }
+        if buf.trim().is_empty() {
+            buf.clear();
+            continue;
+        }
+        // Semicolons are optional since 2026.2.0.0: the lexer inserts one at the
+        // end of the input automatically, so `let x = 1` is a complete
+        // statement. A construct that is still open (unbalanced braces, a
+        // dangling operator) makes the parser report an error at end of
+        // input, and we keep reading lines until it closes.
+
+        let tokens = match Lexer::new(&buf).tokenize() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("{}", errors::render(&e, "<repl>", &buf));
+                buf.clear();
+                continue;
+            }
+        };
+        let mut program = match Parser::new(tokens).parse() {
+            Ok(p) => p,
+            Err(e) => {
+                if e.is_at_eof() {
+                    continue; // keep reading the same construct
+                }
+                eprintln!("{}", errors::render(&e, "<repl>", &buf));
+                buf.clear();
+                continue;
+            }
+        };
+        // Echo bare expressions, like a calculator.
+        if program.len() == 1 && matches!(program[0].kind, StmtKind::Expr(_)) {
+            program = vec![echo_statement(program.pop().unwrap())];
+        }
+        match compile(&program) {
+            Ok(proto) => {
+                if let Err(e) = vm.run_script(proto) {
+                    eprintln!("{}", errors::render(&e, "<repl>", &buf));
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", errors::render(&e, "<repl>", &buf));
+            }
+        }
+        buf.clear();
+    }
+    0
+}
+
+/// Rewrite `expr` into `println(expr)` so the REPL shows its value.
+fn echo_statement(stmt: Stmt) -> Stmt {
+    let (line, col) = (stmt.line, stmt.col);
+    let expr = match stmt.kind {
+        StmtKind::Expr(e) => e,
+        _ => unreachable!(),
+    };
+    let call = Expr::new(
+        ExprKind::Call {
+            callee: Box::new(Expr::new(
+                ExprKind::Ident("println".to_string()),
+                line,
+                col,
+            )),
+            args: vec![expr],
+        },
+        line,
+        col,
+    );
+    Stmt::new(StmtKind::Expr(call), line, col)
+}
+

@@ -1,0 +1,996 @@
+//! Compiler: lowers the AST to bytecode.
+//!
+//! One [`FnCtx`] per function nesting level. Locals live on the VM stack
+//! (slot 0 is reserved for the running closure itself); variables at the
+//! script's top level become globals. Names that escape a function are
+//! captured as upvalues (see `vm.rscp` for the runtime side).
+
+use std::rc::Rc;
+
+use crate::ast::*;
+use crate::bytecode::{Chunk, FnProto, Op};
+use crate::errors::RscpError;
+use crate::value::Value;
+
+/// Max locals per function (slot indices are u8; slot 0 is reserved).
+const MAX_LOCALS: usize = 255;
+const MAX_CONSTS: usize = u16::MAX as usize + 1;
+const MAX_CODE: usize = u16::MAX as usize + 1;
+const MAX_UPVALUES: usize = 256;
+
+/// Internal names for `for-in` hidden locals; '%' can never appear in a
+/// user identifier, so these cannot collide or be captured by name.
+const ITER_LOCAL: &str = "%iter";
+const INDEX_LOCAL: &str = "%i";
+const RANGE_END_LOCAL: &str = "%end";
+
+struct Local {
+    name: String,
+    depth: usize,
+    mutable: bool,
+}
+
+struct FnCtx {
+    proto: FnProto,
+    locals: Vec<Local>,
+    scope_depth: usize,
+    is_script: bool,
+}
+
+struct LoopCtx {
+    /// `fns.len()` when the loop was opened; `break`/`continue` are only
+    /// valid when the innermost loop belongs to the function being compiled.
+    fn_depth: usize,
+    /// Locals live when the loop started; `break` unwinds to here (loop
+    /// scope variables die with the loop).
+    locals_at_entry: usize,
+    /// Locals after the loop's own scope was set up (e.g. after the `for`
+    /// initializer); `continue` unwinds to here but keeps these alive.
+    cont_locals: usize,
+    breaks: Vec<usize>,
+    conts: Vec<usize>,
+    /// Known continue target (while loops jump straight to the condition).
+    cont_target: Option<usize>,
+}
+
+/// Compile a program into the script prototype.
+pub fn compile(program: &[Stmt]) -> Result<Rc<FnProto>, RscpError> {
+    let mut c = Compiler {
+        fns: vec![FnCtx {
+            proto: FnProto {
+                name: "<script>".to_string(),
+                arity: 0,
+                upvalues: Vec::new(),
+                chunk: Chunk::new(),
+            },
+            locals: vec![Local {
+                name: String::new(),
+                depth: 0,
+                mutable: false,
+            }],
+            scope_depth: 0,
+            is_script: true,
+        }],
+        loops: Vec::new(),
+        top_names: Vec::new(),
+    };
+    c.stmts(program)?;
+    let line = program.last().map_or(1, |s| s.line);
+    let col = program.last().map_or(1, |s| s.col);
+    c.emit(Op::Return, line, col);
+    let ctx = c.fns.pop().unwrap();
+    Ok(Rc::new(ctx.proto))
+}
+
+struct Compiler {
+    fns: Vec<FnCtx>,
+    loops: Vec<LoopCtx>,
+    /// Names already declared at the script top level (duplicate detection).
+    top_names: Vec<String>,
+}
+
+impl Compiler {
+    // ---- context helpers -------------------------------------------------
+
+    fn cur(&mut self) -> &mut FnCtx {
+        self.fns.last_mut().unwrap()
+    }
+
+    fn at_top_level(&self) -> bool {
+        let f = self.fns.last().unwrap();
+        f.is_script && f.scope_depth == 0
+    }
+
+    fn err(&self, msg: impl Into<String>, line: usize, col: usize) -> RscpError {
+        RscpError::compile(msg, line, col)
+    }
+
+    // ---- emit helpers ------------------------------------------------------
+
+    fn emit(&mut self, op: Op, line: usize, col: usize) -> usize {
+        self.cur().proto.chunk.emit(op, line, col)
+    }
+
+    fn emit_u8(&mut self, op: Op, v: u8, line: usize, col: usize) -> usize {
+        self.cur().proto.chunk.emit_op_u8(op, v, line, col)
+    }
+
+    fn emit_u16(&mut self, op: Op, v: u16, line: usize, col: usize) -> usize {
+        self.cur().proto.chunk.emit_op_u16(op, v, line, col)
+    }
+
+    fn cur_len(&self) -> usize {
+        self.fns.last().unwrap().proto.chunk.code.len()
+    }
+
+    fn emit_jump(&mut self, op: Op, line: usize, col: usize) -> Result<usize, RscpError> {
+        if self.cur_len() >= MAX_CODE {
+            return Err(self.err("function is too large (bytecode exceeds 64 KiB)", line, col));
+        }
+        Ok(self.emit_u16(op, 0, line, col))
+    }
+
+    fn emit_jump_to(&mut self, op: Op, target: usize, line: usize, col: usize) -> Result<(), RscpError> {
+        if self.cur_len() >= MAX_CODE || target >= MAX_CODE {
+            return Err(self.err("function is too large (bytecode exceeds 64 KiB)", line, col));
+        }
+        let site = self.emit_u16(op, 0, line, col);
+        self.cur().proto.chunk.patch_u16(site, target);
+        Ok(())
+    }
+
+    fn patch_jump(&mut self, site: usize, line: usize, col: usize) -> Result<(), RscpError> {
+        let target = self.cur_len();
+        if target >= MAX_CODE {
+            return Err(self.err("function is too large (bytecode exceeds 64 KiB)", line, col));
+        }
+        self.cur().proto.chunk.patch_u16(site, target);
+        Ok(())
+    }
+
+    fn constant(&mut self, v: Value, line: usize, col: usize) -> Result<u16, RscpError> {
+        if self.cur().proto.chunk.consts.len() >= MAX_CONSTS {
+            return Err(self.err("too many constants in one function", line, col));
+        }
+        self.cur().proto.chunk.consts.push(v);
+        Ok((self.cur().proto.chunk.consts.len() - 1) as u16)
+    }
+
+    fn string_const(&mut self, s: &str, line: usize, col: usize) -> Result<u16, RscpError> {
+        let v = Value::str(s);
+        self.constant(v, line, col)
+    }
+
+    // ---- scopes and locals ---------------------------------------------------
+
+    fn begin_scope(&mut self) {
+        self.cur().scope_depth += 1;
+    }
+
+    fn end_scope(&mut self, line: usize, col: usize) {
+        let depth = self.cur().scope_depth;
+        let mut n = 0usize;
+        while self
+            .cur()
+            .locals
+            .last()
+            .map_or(false, |l| l.depth >= depth)
+        {
+            self.cur().locals.pop();
+            n += 1;
+        }
+        if n > 0 {
+            // Pops close any upvalues pointing at these slots.
+            let n = n.min(u8::MAX as usize) as u8;
+            self.emit_u8(Op::PopN, n, line, col);
+        }
+        self.cur().scope_depth -= 1;
+    }
+
+    /// Number of locals currently declared in the function being compiled
+    /// (including the reserved slot 0).
+    fn cur_locals(&self) -> usize {
+        self.fns.last().unwrap().locals.len()
+    }
+
+    /// Declare a local for the value that is currently on top of the stack.
+    fn declare_local(
+        &mut self,
+        name: &str,
+        mutable: bool,
+        line: usize,
+        col: usize,
+    ) -> Result<u8, RscpError> {
+        let depth = self.cur().scope_depth;
+        if self
+            .cur()
+            .locals
+            .iter()
+            .any(|l| l.depth == depth && l.name == name)
+        {
+            return Err(self.err(format!("'{name}' is already defined in this scope"), line, col));
+        }
+        if self.cur().locals.len() >= MAX_LOCALS + 1 {
+            return Err(self.err(format!("too many local variables (max is {MAX_LOCALS})"), line, col));
+        }
+        self.cur().locals.push(Local {
+            name: name.to_string(),
+            depth,
+            mutable,
+        });
+        Ok((self.cur().locals.len() - 1) as u8)
+    }
+
+    fn resolve_local(&self, name: &str) -> Option<u8> {
+        let ctx = self.fns.last().unwrap();
+        ctx.locals
+            .iter()
+            .rposition(|l| l.name == name)
+            .map(|i| i as u8)
+    }
+
+    fn resolve_upvalue(&mut self, name: &str, line: usize, col: usize) -> Result<Option<u8>, RscpError> {
+        if self.fns.len() < 2 {
+            return Ok(None);
+        }
+        self.resolve_upvalue_from(self.fns.len() - 1, name, line, col)
+    }
+
+    fn resolve_upvalue_from(
+        &mut self,
+        fi: usize,
+        name: &str,
+        line: usize,
+        col: usize,
+    ) -> Result<Option<u8>, RscpError> {
+        if fi == 0 {
+            return Ok(None);
+        }
+        if let Some(slot) = self.fns[fi - 1].locals.iter().rposition(|l| l.name == name) {
+            if slot > u8::MAX as usize {
+                return Err(self.err("too many locals in the enclosing function", line, col));
+            }
+            return self.add_upvalue(fi, true, slot as u8, line, col).map(Some);
+        }
+        if let Some(up) = self.resolve_upvalue_from(fi - 1, name, line, col)? {
+            return self.add_upvalue(fi, false, up, line, col).map(Some);
+        }
+        Ok(None)
+    }
+
+    fn add_upvalue(
+        &mut self,
+        fi: usize,
+        is_local: bool,
+        idx: u8,
+        line: usize,
+        col: usize,
+    ) -> Result<u8, RscpError> {
+        let ups = &mut self.fns[fi].proto.upvalues;
+        for (i, &(l, x)) in ups.iter().enumerate() {
+            if l == is_local && x == idx {
+                return Ok(i as u8);
+            }
+        }
+        if ups.len() >= MAX_UPVALUES {
+            return Err(self.err("too many closure variables in one function", line, col));
+        }
+        ups.push((is_local, idx));
+        Ok((ups.len() - 1) as u8)
+    }
+
+    // ---- statements ---------------------------------------------------------
+
+    fn stmts(&mut self, ss: &[Stmt]) -> Result<(), RscpError> {
+        for s in ss {
+            self.stmt(s)?;
+        }
+        Ok(())
+    }
+
+    fn stmt(&mut self, s: &Stmt) -> Result<(), RscpError> {
+        match &s.kind {
+            StmtKind::Let { name, mutable, init } => {
+                if self.at_top_level() {
+                    if self.top_names.iter().any(|n| n == name) {
+                        return Err(self.err(format!("'{name}' is already defined at the top level"), s.line, s.col));
+                    }
+                    self.top_names.push(name.clone());
+                    self.expr(init)?;
+                    let ci = self.string_const(name, s.line, s.col)?;
+                    let op = if *mutable { Op::DefineGlobal } else { Op::DefineGlobalConst };
+                    self.emit_u16(op, ci, s.line, s.col);
+                } else {
+                    // Init first, then declare: `let x = x;` refers to an outer x.
+                    self.expr(init)?;
+                    self.declare_local(name, *mutable, s.line, s.col)?;
+                }
+            }
+            StmtKind::Fn { name, func } => {
+                let ci = self.function(func, Some(name))?;
+                self.emit_closure(ci, s.line, s.col)?;
+                if self.at_top_level() {
+                    if self.top_names.iter().any(|n| n == name) {
+                        return Err(self.err(format!("'{name}' is already defined at the top level"), s.line, s.col));
+                    }
+                    self.top_names.push(name.clone());
+                    let gi = self.string_const(name, s.line, s.col)?;
+                    self.emit_u16(Op::DefineGlobalConst, gi, s.line, s.col);
+                } else {
+                    // Named function bindings are immutable.
+                    self.declare_local(name, false, s.line, s.col)?;
+                }
+            }
+            StmtKind::Assign { target, op, value } => {
+                self.assign(target, op.binary(), Some(value), s.line, s.col)?;
+            }
+            StmtKind::IncDec { target, plus } => {
+                let bin = if *plus { BinaryOp::Add } else { BinaryOp::Sub };
+                self.assign(target, Some(bin), None, s.line, s.col)?;
+            }
+            StmtKind::Expr(e) => {
+                self.expr(e)?;
+                self.emit(Op::Pop, s.line, s.col);
+            }
+            StmtKind::Block(stmts) => {
+                self.begin_scope();
+                self.stmts(stmts)?;
+                self.end_scope(s.line, s.col);
+            }
+            StmtKind::If { cond, then, els } => {
+                self.expr(cond)?;
+                let jelse = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
+                self.emit(Op::Pop, s.line, s.col);
+                self.stmt(then)?;
+                let jend = self.emit_jump(Op::Jump, s.line, s.col)?;
+                self.patch_jump(jelse, s.line, s.col)?;
+                self.emit(Op::Pop, s.line, s.col);
+                if let Some(e) = els {
+                    self.stmt(e)?;
+                }
+                self.patch_jump(jend, s.line, s.col)?;
+            }
+            StmtKind::While { cond, body } => {
+                let cond_start = self.cur_len();
+                self.expr(cond)?;
+                let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
+                self.emit(Op::Pop, s.line, s.col);
+
+                let locals_at_entry = self.cur_locals();
+                self.loops.push(LoopCtx {
+                    fn_depth: self.fns.len(),
+                    locals_at_entry,
+                    cont_locals: locals_at_entry,
+                    breaks: Vec::new(),
+                    conts: Vec::new(),
+                    cont_target: Some(cond_start),
+                });
+                self.stmt(body)?;
+                let ctx = self.loops.pop().unwrap();
+
+                self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
+                self.patch_jump(jend, s.line, s.col)?;
+                self.emit(Op::Pop, s.line, s.col);
+                for b in ctx.breaks {
+                    self.patch_jump(b, s.line, s.col)?;
+                }
+            }
+            StmtKind::ForC { init, cond, step, body } => {
+                let locals_at_entry = self.cur_locals();
+                self.begin_scope();
+                if let Some(i) = init {
+                    self.stmt(i)?;
+                }
+                let cond_start = self.cur_len();
+                match cond {
+                    Some(c) => self.expr(c)?,
+                    None => {
+                        self.emit(Op::True, s.line, s.col);
+                    }
+                }
+                let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
+                self.emit(Op::Pop, s.line, s.col);
+
+                self.loops.push(LoopCtx {
+                    fn_depth: self.fns.len(),
+                    locals_at_entry,
+                    cont_locals: self.cur_locals(),
+                    breaks: Vec::new(),
+                    conts: Vec::new(),
+                    cont_target: None,
+                });
+                self.stmt(body)?;
+
+                let step_start = self.cur_len();
+                if let Some(st) = step {
+                    self.stmt(st)?;
+                }
+                let ctx = self.loops.pop().unwrap();
+
+                self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
+                self.patch_jump(jend, s.line, s.col)?;
+                self.emit(Op::Pop, s.line, s.col);
+                for c in ctx.conts {
+                    self.patch_to(c, step_start);
+                }
+                self.end_scope(s.line, s.col);
+                for b in ctx.breaks {
+                    self.patch_jump(b, s.line, s.col)?;
+                }
+            }
+            StmtKind::ForIn { mutable, name, iter, body } => {
+                let locals_at_entry = self.cur_locals();
+                self.begin_scope();
+                if let ExprKind::Range { start, end, inclusive } = &iter.kind {
+                    // `for i in a..b { }` — a counted loop over integers:
+                    // hidden mutable counter %i from `start` while < (or <=) `end`.
+                    let (iline, icol) = (iter.line, iter.col);
+                    self.expr(start)?;
+                    let idx_slot = self.declare_local(INDEX_LOCAL, true, iline, icol)?;
+                    self.expr(end)?;
+                    let end_slot = self.declare_local(RANGE_END_LOCAL, false, iline, icol)?;
+                    // Placeholder cell for the loop variable, filled by
+                    // SetLocal at the top of each iteration.
+                    self.emit(Op::Null, s.line, s.col);
+                    let elem_slot = self.declare_local(name, *mutable, s.line, s.col)?;
+
+                    let cond_start = self.cur_len();
+                    self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
+                    self.emit_u8(Op::GetLocal, end_slot, s.line, s.col);
+                    let cmp = if *inclusive { Op::Le } else { Op::Less };
+                    self.emit(cmp, s.line, s.col);
+                    let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
+                    self.emit(Op::Pop, s.line, s.col);
+
+                    self.loops.push(LoopCtx {
+                        fn_depth: self.fns.len(),
+                        locals_at_entry,
+                        cont_locals: self.cur_locals(),
+                        breaks: Vec::new(),
+                        conts: Vec::new(),
+                        cont_target: None,
+                    });
+
+                    self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
+                    self.emit_u8(Op::SetLocal, elem_slot, s.line, s.col);
+                    self.stmt(body)?;
+
+                    let step_start = self.cur_len();
+                    self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
+                    let one_ci = self.int_const(1, s.line, s.col)?;
+                    self.emit_u16(Op::Constant, one_ci, s.line, s.col);
+                    self.emit(Op::Add, s.line, s.col);
+                    self.emit_u8(Op::SetLocal, idx_slot, s.line, s.col);
+
+                    let ctx = self.loops.pop().unwrap();
+                    self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
+                    self.patch_jump(jend, s.line, s.col)?;
+                    self.emit(Op::Pop, s.line, s.col);
+                    for c in ctx.conts {
+                        self.patch_to(c, step_start);
+                    }
+                    self.end_scope(s.line, s.col);
+                    for b in ctx.breaks {
+                        self.patch_jump(b, s.line, s.col)?;
+                    }
+                    return Ok(());
+                }
+                // Array/map iteration: hidden locals for the iterable and index.
+                self.expr(iter)?;
+                let iter_slot = self.declare_local(ITER_LOCAL, false, s.line, s.col)?;
+                let zero_ci = self.int_const(0, s.line, s.col)?;
+                self.emit_u16(Op::Constant, zero_ci, s.line, s.col);
+                let idx_slot = self.declare_local(INDEX_LOCAL, true, s.line, s.col)?;
+                // Placeholder for the element variable: its slot is written
+                // by SetLocal at the top of each iteration, so the stack must
+                // own a cell for it from the start.
+                self.emit(Op::Null, s.line, s.col);
+                let elem_slot = self.declare_local(name, *mutable, s.line, s.col)?;
+
+                let cond_start = self.cur_len();
+                self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
+                self.emit_u8(Op::GetLocal, iter_slot, s.line, s.col);
+                self.emit(Op::ArrayLen, s.line, s.col);
+                self.emit(Op::Less, s.line, s.col);
+                let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
+                self.emit(Op::Pop, s.line, s.col);
+
+                self.loops.push(LoopCtx {
+                    fn_depth: self.fns.len(),
+                    locals_at_entry,
+                    cont_locals: self.cur_locals(),
+                    breaks: Vec::new(),
+                    conts: Vec::new(),
+                    cont_target: None,
+                });
+
+                // Assign the element into its slot, run the body.
+                self.emit_u8(Op::GetLocal, iter_slot, s.line, s.col);
+                self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
+                self.emit(Op::IndexGet, s.line, s.col);
+                self.emit_u8(Op::SetLocal, elem_slot, s.line, s.col);
+                self.stmt(body)?;
+
+                // Increment the hidden index.
+                let step_start = self.cur_len();
+                self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
+                let one_ci = self.int_const(1, s.line, s.col)?;
+                self.emit_u16(Op::Constant, one_ci, s.line, s.col);
+                self.emit(Op::Add, s.line, s.col);
+                self.emit_u8(Op::SetLocal, idx_slot, s.line, s.col);
+
+                let ctx = self.loops.pop().unwrap();
+                self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
+                self.patch_jump(jend, s.line, s.col)?;
+                self.emit(Op::Pop, s.line, s.col);
+                for c in ctx.conts {
+                    self.patch_to(c, step_start);
+                }
+                self.end_scope(s.line, s.col);
+                for b in ctx.breaks {
+                    self.patch_jump(b, s.line, s.col)?;
+                }
+            }
+            StmtKind::Return(value) => {
+                if self.fns.len() == 1 {
+                    return Err(self.err("'return' outside of a function", s.line, s.col));
+                }
+                match value {
+                    Some(e) => self.expr(e)?,
+                    None => {
+                        self.emit(Op::Null, s.line, s.col);
+                    }
+                }
+                self.emit(Op::Return, s.line, s.col);
+            }
+            StmtKind::Break => {
+                if !self.loop_available() {
+                    return Err(self.err("'break' outside of a loop", s.line, s.col));
+                }
+                let n = {
+                    let ctx = self.loops.last().unwrap();
+                    self.cur_locals() - ctx.locals_at_entry
+                };
+                if n > 0 {
+                    self.emit_u8(Op::PopN, n.min(u8::MAX as usize) as u8, s.line, s.col);
+                }
+                let site = self.emit_jump(Op::Jump, s.line, s.col)?;
+                self.loops.last_mut().unwrap().breaks.push(site);
+            }
+            StmtKind::Continue => {
+                if !self.loop_available() {
+                    return Err(self.err("'continue' outside of a loop", s.line, s.col));
+                }
+                let (target, n) = {
+                    let ctx = self.loops.last().unwrap();
+                    (ctx.cont_target, self.cur_locals() - ctx.cont_locals)
+                };
+                if n > 0 {
+                    self.emit_u8(Op::PopN, n.min(u8::MAX as usize) as u8, s.line, s.col);
+                }
+                match target {
+                    Some(t) => self.emit_jump_to(Op::Jump, t, s.line, s.col)?,
+                    None => {
+                        let site = self.emit_jump(Op::Jump, s.line, s.col)?;
+                        self.loops.last_mut().unwrap().conts.push(site);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn loop_available(&self) -> bool {
+        self.loops
+            .last()
+            .map_or(false, |l| l.fn_depth == self.fns.len())
+    }
+
+    fn patch_to(&mut self, site: usize, target: usize) {
+        self.cur().proto.chunk.patch_u16(site, target);
+    }
+
+    /// Emit `Closure ci` followed by the prototype's upvalue capture
+    /// descriptors: one (is_local, index) byte pair per captured variable.
+    fn emit_closure(&mut self, ci: u16, line: usize, col: usize) -> Result<(), RscpError> {
+        self.emit_u16(Op::Closure, ci, line, col);
+        let ups: Vec<(bool, u8)> = match &self.cur().proto.chunk.consts[ci as usize] {
+            Value::Proto(p) => p.upvalues.clone(),
+            _ => return Err(self.err("internal error: Closure constant is not a prototype", line, col)),
+        };
+        for (is_local, idx) in ups {
+            let chunk = &mut self.cur().proto.chunk;
+            chunk.push_byte(is_local as u8, line, col);
+            chunk.push_byte(idx, line, col);
+        }
+        Ok(())
+    }
+
+    fn int_const(&mut self, v: i64, line: usize, col: usize) -> Result<u16, RscpError> {
+        self.constant(Value::Int(v), line, col)
+    }
+
+    // ---- assignment -----------------------------------------------------------
+
+    /// Compile an assignment. `value == None` means `++`/`--` by 1.
+    fn assign(
+        &mut self,
+        target: &Target,
+        binop: Option<BinaryOp>,
+        value: Option<&Expr>,
+        line: usize,
+        col: usize,
+    ) -> Result<(), RscpError> {
+        match target {
+            Target::Ident { name, line: tl, col: tc } => {
+                if let Some(bin) = binop {
+                    self.load_ident(name, *tl, *tc)?;
+                    match value {
+                        Some(v) => self.expr(v)?,
+                        None => {
+                            let ci = self.int_const(1, *tl, *tc)?;
+                            self.emit_u16(Op::Constant, ci, line, col);
+                        }
+                    }
+                    self.emit_binop(bin, line, col)?;
+                } else {
+                    self.expr(value.unwrap())?;
+                }
+                self.store_ident(name, *tl, *tc)?;
+            }
+            Target::Index { obj, idx } => {
+                self.expr(obj)?;
+                self.expr(idx)?;
+                if let Some(bin) = binop {
+                    // obj, idx stay on the stack; IndexGetKeep pushes the
+                    // current value, the binary op combines it, IndexSet
+                    // then consumes obj, idx and the new value.
+                    self.emit(Op::IndexGetKeep, line, col);
+                    match value {
+                        Some(v) => self.expr(v)?,
+                        None => {
+                            let ci = self.int_const(1, line, col)?;
+                            self.emit_u16(Op::Constant, ci, line, col);
+                        }
+                    }
+                    self.emit_binop(bin, line, col)?;
+                } else {
+                    self.expr(value.unwrap())?;
+                }
+                self.emit(Op::IndexSet, line, col);
+            }
+        }
+        Ok(())
+    }
+
+    fn load_ident(&mut self, name: &str, line: usize, col: usize) -> Result<(), RscpError> {
+        if let Some(slot) = self.resolve_local(name) {
+            self.emit_u8(Op::GetLocal, slot, line, col);
+        } else if let Some(up) = self.resolve_upvalue(name, line, col)? {
+            self.emit_u8(Op::GetUpvalue, up, line, col);
+        } else {
+            let ci = self.string_const(name, line, col)?;
+            self.emit_u16(Op::GetGlobal, ci, line, col);
+        }
+        Ok(())
+    }
+
+    fn store_ident(&mut self, name: &str, line: usize, col: usize) -> Result<(), RscpError> {
+        if let Some(slot) = self.resolve_local(name) {
+            let local = &self.fns.last().unwrap().locals[slot as usize];
+            if !local.mutable {
+                return Err(self.err(
+                    format!("cannot assign to immutable variable '{name}' (declared with 'let')"),
+                    line,
+                    col,
+                ));
+            }
+            self.emit_u8(Op::SetLocal, slot, line, col);
+        } else if let Some(up) = self.resolve_upvalue(name, line, col)? {
+            self.emit_u8(Op::SetUpvalue, up, line, col);
+        } else {
+            let ci = self.string_const(name, line, col)?;
+            self.emit_u16(Op::SetGlobal, ci, line, col);
+        }
+        Ok(())
+    }
+
+    // ---- expressions --------------------------------------------------------
+
+    fn expr(&mut self, e: &Expr) -> Result<(), RscpError> {
+        match &e.kind {
+            ExprKind::Int(v) => {
+                let ci = self.constant(Value::Int(*v), e.line, e.col)?;
+                self.emit_u16(Op::Constant, ci, e.line, e.col);
+            }
+            ExprKind::Float(v) => {
+                let ci = self.constant(Value::Float(*v), e.line, e.col)?;
+                self.emit_u16(Op::Constant, ci, e.line, e.col);
+            }
+            ExprKind::Str(v) => {
+                let ci = self.string_const(v, e.line, e.col)?;
+                self.emit_u16(Op::Constant, ci, e.line, e.col);
+            }
+            ExprKind::Bool(b) => {
+                self.emit(if *b { Op::True } else { Op::False }, e.line, e.col);
+            }
+            ExprKind::Null => {
+                self.emit(Op::Null, e.line, e.col);
+            }
+            ExprKind::Ident(name) => {
+                self.load_ident(name, e.line, e.col)?;
+            }
+            ExprKind::Unary { op, expr } => {
+                self.expr(expr)?;
+                match op {
+                    UnaryOp::Not => {
+                        self.emit(Op::Not, e.line, e.col);
+                    }
+                    UnaryOp::Neg => {
+                        self.emit(Op::Negate, e.line, e.col);
+                    }
+                }
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                self.expr(lhs)?;
+                self.expr(rhs)?;
+                self.emit_binop(*op, e.line, e.col)?;
+            }
+            ExprKind::Logical { op, lhs, rhs } => {
+                self.expr(lhs)?;
+                let jump = match op {
+                    LogicalOp::And => self.emit_jump(Op::JumpIfFalsePeek, e.line, e.col)?,
+                    LogicalOp::Or => self.emit_jump(Op::JumpIfTruePeek, e.line, e.col)?,
+                };
+                self.emit(Op::Pop, e.line, e.col);
+                self.expr(rhs)?;
+                self.patch_jump(jump, e.line, e.col)?;
+            }
+            ExprKind::Ternary { cond, then, els } => {
+                self.expr(cond)?;
+                let jelse = self.emit_jump(Op::JumpIfFalsePeek, e.line, e.col)?;
+                self.emit(Op::Pop, e.line, e.col);
+                self.expr(then)?;
+                let jend = self.emit_jump(Op::Jump, e.line, e.col)?;
+                self.patch_jump(jelse, e.line, e.col)?;
+                self.emit(Op::Pop, e.line, e.col);
+                self.expr(els)?;
+                self.patch_jump(jend, e.line, e.col)?;
+            }
+            ExprKind::Call { callee, args } => {
+                if args.len() > u8::MAX as usize {
+                    return Err(self.err(format!("too many arguments in a call (max is {})", u8::MAX), e.line, e.col));
+                }
+                self.expr(callee)?;
+                for a in args {
+                    self.expr(a)?;
+                }
+                self.emit_u8(Op::Call, args.len() as u8, e.line, e.col);
+            }
+            ExprKind::Index { obj, idx } => {
+                self.expr(obj)?;
+                self.expr(idx)?;
+                self.emit(Op::IndexGet, e.line, e.col);
+            }
+            ExprKind::Range { .. } => {
+                return Err(self.err(
+                    "a range ('a..b') can only be the iterable of a 'for' loop",
+                    e.line,
+                    e.col,
+                ));
+            }
+            ExprKind::Array(items) => {
+                if items.len() > u16::MAX as usize {
+                    return Err(self.err("array literal is too large", e.line, e.col));
+                }
+                for item in items {
+                    self.expr(item)?;
+                }
+                self.emit_u16(Op::Array, items.len() as u16, e.line, e.col);
+            }
+            ExprKind::Map(pairs) => {
+                if pairs.len() > u16::MAX as usize {
+                    return Err(self.err("map literal is too large", e.line, e.col));
+                }
+                for (k, v) in pairs {
+                    self.expr(k)?;
+                    self.expr(v)?;
+                }
+                self.emit_u16(Op::Map, pairs.len() as u16, e.line, e.col);
+            }
+            ExprKind::Func(lit) => {
+                let ci = self.function(lit, None)?;
+                self.emit_closure(ci, e.line, e.col)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_binop(&mut self, op: BinaryOp, line: usize, col: usize) -> Result<(), RscpError> {
+        let opcode = match op {
+            BinaryOp::Add => Op::Add,
+            BinaryOp::Sub => Op::Sub,
+            BinaryOp::Mul => Op::Mul,
+            BinaryOp::Div => Op::Div,
+            BinaryOp::Mod => Op::Mod,
+            BinaryOp::Eq => Op::Equal,
+            BinaryOp::Lt => Op::Less,
+            BinaryOp::Le => Op::Le,
+            BinaryOp::Gt => Op::Greater,
+            BinaryOp::Ge => Op::Ge,
+            BinaryOp::Ne => {
+                self.emit(Op::Equal, line, col);
+                self.emit(Op::Not, line, col);
+                return Ok(());
+            }
+        };
+        self.emit(opcode, line, col);
+        Ok(())
+    }
+
+    /// Compile a function literal into a prototype, register it in the
+    /// enclosing constant pool and return its index.
+    fn function(&mut self, lit: &FuncLit, name: Option<&str>) -> Result<u16, RscpError> {
+        let (line, col) = (lit.line, lit.col);
+        if lit.params.len() > u8::MAX as usize {
+            return Err(self.err(format!("too many parameters (max is {})", u8::MAX), line, col));
+        }
+        let mut ctx = FnCtx {
+            proto: FnProto {
+                name: name.unwrap_or("").to_string(),
+                arity: lit.params.len() as u8,
+                upvalues: Vec::new(),
+                chunk: Chunk::new(),
+            },
+            // Slot 0 is reserved for the running closure itself.
+            locals: vec![Local {
+                name: String::new(),
+                depth: 1,
+                mutable: false,
+            }],
+            scope_depth: 1,
+            is_script: false,
+        };
+        for p in &lit.params {
+            ctx.locals.push(Local {
+                name: p.clone(),
+                depth: 1,
+                mutable: true, // parameters are assignable
+            });
+        }
+        self.fns.push(ctx);
+        self.stmts(&lit.body)?;
+        // Implicit `return null;`
+        let last_line = lit.body.last().map_or(line, |s| s.line);
+        let last_col = lit.body.last().map_or(col, |s| s.col);
+        self.emit(Op::Null, last_line, last_col);
+        self.emit(Op::Return, last_line, last_col);
+        let done = self.fns.pop().unwrap();
+        self.constant(Value::Proto(Rc::new(done.proto)), line, col)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn compile_src(src: &str) -> Rc<FnProto> {
+        let tokens = Lexer::new(src).tokenize().unwrap();
+        let program = Parser::new(tokens).parse().unwrap();
+        compile(&program).unwrap()
+    }
+
+    #[test]
+    fn globals_and_constants() {
+        let proto = compile_src("let a = 42; var b = \"hi\";");
+        let code = &proto.chunk.code;
+        assert_eq!(code[0], Op::Constant as u8);
+        // 'a' is immutable -> DefineGlobalConst
+        let ops: Vec<u8> = code.clone();
+        assert!(ops.windows(1).any(|w| w[0] == Op::DefineGlobalConst as u8));
+        assert!(ops.windows(1).any(|w| w[0] == Op::DefineGlobal as u8));
+    }
+
+    #[test]
+    fn locals_use_slots() {
+        let proto = compile_src("fn f(x) { var y = x + 1; y = y + 2; return y; }");
+        // Script constants: the prototype and the name "f" for DefineGlobalConst.
+        assert_eq!(proto.chunk.consts.len(), 2);
+        let f = match &proto.chunk.consts[0] {
+            Value::Proto(p) => p.clone(),
+            _ => panic!("expected proto"),
+        };
+        assert_eq!(f.arity, 1);
+        assert_eq!(f.name, "f");
+        assert!(f.chunk.code.contains(&(Op::GetLocal as u8)));
+        assert!(f.chunk.code.contains(&(Op::SetLocal as u8)));
+        assert!(f.chunk.code.contains(&(Op::Return as u8)));
+    }
+
+    #[test]
+    fn closure_captures() {
+        let proto = compile_src("fn outer() { var c = 0; fn inner() { c++; } return inner; }");
+        let outer = match &proto.chunk.consts[0] {
+            Value::Proto(p) => p.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(outer.upvalues.len(), 0);
+        let inner = outer
+            .chunk
+            .consts
+            .iter()
+            .find_map(|c| match c {
+                Value::Proto(p) if p.name == "inner" => Some(p.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(inner.upvalues, vec![(true, 1)]); // local slot 1 = c
+    }
+
+    #[test]
+    fn loop_jumps() {
+        let proto = compile_src("var i = 0; while (i < 3) { i++; }");
+        let ops = &proto.chunk.code;
+        assert!(ops.contains(&(Op::Loop as u8)));
+        assert!(ops.contains(&(Op::JumpIfFalsePeek as u8)));
+    }
+
+    #[test]
+    fn range_loop_compiles_to_counted_loop() {
+        // `for i in 0..10 { }` must not allocate an array.
+        let proto = compile_src("var t = 0\nfor i in 0..10 {\n    t += i\n}\nfor j in 0..=2 { t += j }\n");
+        assert!(!proto.chunk.code.contains(&(Op::Array as u8)));
+        assert!(proto.chunk.code.contains(&(Op::Loop as u8)));
+    }
+
+    #[test]
+    fn range_outside_for_rejected() {
+        for src in ["var r = 1..10\n", "var x = 0\nx = 2..=5\n", "println(0..1)\n"] {
+            let tokens = Lexer::new(src).tokenize().unwrap();
+            let program = Parser::new(tokens).parse().unwrap();
+            assert!(compile(&program).is_err(), "expected error for: {src}");
+        }
+    }
+
+    #[test]
+    fn light_style_compiles() {
+        // The whole 2026.2.0.0 feature set in one program.
+        let src = "\
+fn add(a, b) -> a + b
+let double = |x| x * 2
+var total = 0
+for i in 0..=9 {
+    if i % 2 == 0 { continue }
+    total += double(i)
+}
+loop {
+    total += 1
+    if total > 50 { break }
+}
+while total > 30 {
+    total -= add(1, 0)
+}
+";
+        let proto = compile_src(src);
+        assert!(proto.chunk.code.contains(&(Op::Loop as u8)));
+    }
+
+    #[test]
+    fn compile_errors() {
+        let cases = [
+            "let x = 1; let x = 2;",
+            "fn f() {} fn f() {}",
+            "break;",
+            "continue;",
+            "return 1;",
+            "fn f() { let a = 1; let a = 2; }",
+        ];
+        for src in cases {
+            let tokens = Lexer::new(src).tokenize().unwrap();
+            let program = Parser::new(tokens).parse().unwrap();
+            assert!(compile(&program).is_err(), "expected error for: {src}");
+        }
+    }
+}

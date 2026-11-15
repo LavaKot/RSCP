@@ -1,0 +1,10 @@
+fn truthy() { println("truthy evaluated"); return true; }
+fn falsy() { println("falsy evaluated"); return false; }
+println(false && falsy());
+println(true || falsy());
+println(true && truthy());
+println(false || falsy());
+println(!true, !false);
+var a = true ? 1 : 2;
+var b = false ? 1 : true ? 2 : 3;
+println(a, b);

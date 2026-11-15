@@ -1,0 +1,14 @@
+let config = {
+    "name": "rscp",
+    "version": [0, 1, 0],
+    "options": {"debug": true, "level": 2}
+};
+println(config);
+println(config["name"], config["version"][0], config["options"]["level"]);
+var db = [
+    {"id": 1, "tags": ["a", "b"]},
+    {"id": 2, "tags": ["c"]}
+];
+for (let row in db) {
+    println("id", row["id"], "tags", row["tags"]);
+}

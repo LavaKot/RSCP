@@ -1,0 +1,49 @@
+{
+  "name": "rscp",
+  "displayName": "RSCP",
+  "description": "RSCP language support: syntax highlighting, snippets and bracket support for .rscp files (light like Python, shaped like Rust)",
+  "version": "2026.2.0",
+  "publisher": "rscp-lang",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "rscp",
+    "language",
+    "scripting",
+    "bytecode"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "rscp",
+        "aliases": [
+          "RSCP",
+          "rscp"
+        ],
+        "extensions": [
+          ".rscp"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rscp",
+        "scopeName": "source.rscp",
+        "path": "./syntaxes/rscp.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "rscp",
+        "path": "./snippets/rscp.json"
+      }
+    ]
+  }
+}

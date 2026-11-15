@@ -1,0 +1,18 @@
+fn fib(n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn fibIter(n) {
+    var a = 0;
+    var b = 1;
+    for (var i = 0; i < n; i++) {
+        let t = a + b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+for (var i = 0; i < 10; i++) { print(fib(i)); print(" "); }
+println();
+println(fib(20));
+println(fibIter(50));

@@ -1,0 +1,8 @@
+// Arrow function bodies: an implicit `return`.
+fn square(x) -> x * x
+fn greet(name) -> "hi, " + name
+fn makeAdder(n) -> |x| x + n
+println(square(8), greet("rscp"), makeAdder(10)(5))
+
+fn fib(n) -> n < 2 ? n : fib(n - 1) + fib(n - 2)
+println(fib(15))

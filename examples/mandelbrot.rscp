@@ -1,0 +1,28 @@
+// ASCII Mandelbrot set: ranges, nested loops, floats and string building.
+let width = 60
+let height = 20
+
+for y in 0..height {
+    var line = ""
+    for x in 0..width {
+        let cx = (x - width / 2) * 3.0 / width
+        let cy = (y - height / 2) * 2.0 / height
+        var zx = 0.0
+        var zy = 0.0
+        var iter = 0
+        var escaped = false
+        while iter < 30 {
+            let nx = zx * zx - zy * zy + cx
+            let ny = 2.0 * zx * zy + cy
+            zx = nx
+            zy = ny
+            if zx * zx + zy * zy > 4.0 {
+                escaped = true
+                break
+            }
+            iter++
+        }
+        if escaped { line += " " } else { line += "#" }
+    }
+    println(line)
+}

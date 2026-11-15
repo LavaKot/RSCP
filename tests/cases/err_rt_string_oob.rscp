@@ -1,0 +1,2 @@
+let s = "hi";
+println(s[5]);

@@ -1,0 +1,139 @@
+//! Unified error type for every RSCP pipeline stage,
+//! plus human-friendly rendering with a source excerpt and a caret.
+
+use std::fmt;
+
+/// One entry of a runtime stack trace.
+#[derive(Debug, Clone)]
+pub struct TraceFrame {
+    pub name: String,
+    pub line: usize,
+}
+
+/// An error from any stage: lexing, parsing, compiling, or execution.
+#[derive(Debug, Clone)]
+pub enum RscpError {
+    Lex {
+        msg: String,
+        line: usize,
+        col: usize,
+    },
+    Parse {
+        msg: String,
+        line: usize,
+        col: usize,
+        at_eof: bool,
+    },
+    Compile {
+        msg: String,
+        line: usize,
+        col: usize,
+    },
+    Runtime {
+        msg: String,
+        line: usize,
+        trace: Vec<TraceFrame>,
+    },
+}
+
+impl RscpError {
+    pub fn lex(msg: impl Into<String>, line: usize, col: usize) -> Self {
+        RscpError::Lex { msg: msg.into(), line, col }
+    }
+
+    pub fn parse(msg: impl Into<String>, line: usize, col: usize, at_eof: bool) -> Self {
+        RscpError::Parse { msg: msg.into(), line, col, at_eof }
+    }
+
+    pub fn compile(msg: impl Into<String>, line: usize, col: usize) -> Self {
+        RscpError::Compile { msg: msg.into(), line, col }
+    }
+
+    pub fn runtime(msg: impl Into<String>, line: usize) -> Self {
+        RscpError::Runtime { msg: msg.into(), line, trace: Vec::new() }
+    }
+
+    /// Lower-case stage name, e.g. "syntax error".
+    pub fn kind(&self) -> &'static str {
+        match self {
+            RscpError::Lex { .. } => "lexical error",
+            RscpError::Parse { .. } => "syntax error",
+            RscpError::Compile { .. } => "compile error",
+            RscpError::Runtime { .. } => "runtime error",
+        }
+    }
+
+    /// (line, col) of the error; runtime errors may have line 0 (no position).
+    pub fn position(&self) -> (usize, usize) {
+        match self {
+            RscpError::Lex { line, col, .. }
+            | RscpError::Parse { line, col, .. }
+            | RscpError::Compile { line, col, .. } => (*line, *col),
+            RscpError::Runtime { line, .. } => (*line, 0),
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            RscpError::Lex { msg, .. }
+            | RscpError::Parse { msg, .. }
+            | RscpError::Compile { msg, .. }
+            | RscpError::Runtime { msg, .. } => msg,
+        }
+    }
+
+    /// True when a parse error was caused by running out of input.
+    /// The REPL uses this to keep reading lines instead of reporting an error.
+    pub fn is_at_eof(&self) -> bool {
+        matches!(self, RscpError::Parse { at_eof: true, .. })
+    }
+
+    /// Process exit code for this error class (sysexits-style).
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            RscpError::Runtime { .. } => 70, // EX_SOFTWARE
+            _ => 65,                          // EX_DATAERR
+        }
+    }
+}
+
+impl fmt::Display for RscpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (line, col) = self.position();
+        write!(f, "{} at {}:{}: {}", self.kind(), line, col, self.message())
+    }
+}
+
+/// Render an error with a source excerpt, a caret and the runtime stack
+/// trace, prefixed by the file name. Used by the CLI and the test runner.
+pub fn render(err: &RscpError, file: &str, source: &str) -> String {
+    let (line, col) = err.position();
+    let head = if col >= 1 {
+        format!("{}[{}:{}:{}]", err.kind(), file, line, col)
+    } else {
+        // Runtime errors carry a line but no column.
+        format!("{}[{}:{}]", err.kind(), file, line)
+    };
+    let mut out = format!("{}: {}\n", head, err.message());
+
+    if line >= 1 {
+        if let Some(text) = source.lines().nth(line - 1) {
+            let lno = line.to_string();
+            let pad = " ".repeat(lno.len());
+            out.push_str(&format!(" {pad} | {text}\n"));
+            if col >= 1 {
+                out.push_str(&format!(" {pad} | {}^\n", " ".repeat(col.saturating_sub(1))));
+            }
+        }
+    }
+
+    if let RscpError::Runtime { trace, .. } = err {
+        if !trace.is_empty() {
+            out.push_str("stack trace (innermost first):\n");
+            for (i, fr) in trace.iter().enumerate() {
+                out.push_str(&format!("  {}. {} at line {}\n", i + 1, fr.name, fr.line));
+            }
+        }
+    }
+    out
+}

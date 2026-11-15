@@ -1,0 +1,9 @@
+{"one": 1, "two": 2}
+1 2
+{"one": 1, "three": 3, "two": 2} 3
+true false
+["one", "three", "two"]
+one three two 
+11
+2 1
+{"list": [1, 2], "map": {"x": 1}}

@@ -1,0 +1,668 @@
+//! Lexer: converts RSCP source text into a flat token stream.
+//!
+//! Positions are 1-based. `line` advances on '\n'; `col` counts characters.
+//! Supported literals: integers (decimal, hex, `_` separators), floats
+//! (fractional part and/or exponent), and double-quoted strings with escapes.
+//!
+//! Semicolons are optional: when a newline follows a token that can end a
+//! statement (Go-style automatic semicolon insertion), a `;` is synthesized
+//! unless the next token cannot begin a new statement.
+
+use crate::errors::RscpError;
+use crate::token::{keyword, Lit, Token, TokenType};
+
+/// Token types after which a newline terminates the statement
+/// (Go's semicolon insertion rule).
+fn ends_statement(ty: TokenType) -> bool {
+    use TokenType::*;
+    matches!(
+        ty,
+        Ident | Int | Float | Str | True | False | Null | Return | Break | Continue | RParen
+            | RBracket | RBrace | PlusPlus | MinusMinus
+    )
+}
+
+/// Token types that never begin a new statement, so a newline right before
+/// them is a continuation, not a statement end (e.g. the `}` or `]` closing
+/// a multiline literal, a `,` between arguments, an `else`, ...).
+fn continues_expression(ty: TokenType) -> bool {
+    use TokenType::*;
+    matches!(
+        ty,
+        RBrace | RBracket | RParen | Comma | Colon | Semicolon | Question | DotDot | DotDotEq
+            | Arrow | Else
+    )
+}
+
+/// The `;` synthesized by automatic semicolon insertion. `lexeme` is "\n" so
+/// `rscp tokens` output makes the origin visible.
+fn synthetic_semicolon(line: usize, col: usize) -> Token {
+    Token {
+        ty: TokenType::Semicolon,
+        lexeme: "\n".to_string(),
+        lit: None,
+        line,
+        col,
+    }
+}
+
+pub struct Lexer<'src> {
+    src: &'src str,
+    pos: usize, // byte offset, always on a char boundary
+    line: usize,
+    col: usize,
+}
+
+impl<'src> Lexer<'src> {
+    pub fn new(src: &'src str) -> Self {
+        Lexer { src, pos: 0, line: 1, col: 1 }
+    }
+
+    /// Tokenize the whole source.
+    pub fn tokenize(mut self) -> Result<Vec<Token>, RscpError> {
+        let mut tokens: Vec<Token> = Vec::new();
+        let mut newline = false; // a newline was crossed since the last token
+        while let Some(c) = self.peek() {
+            match c {
+                ' ' | '\t' | '\r' => {
+                    self.advance();
+                }
+                '\n' => {
+                    self.advance();
+                    newline = true;
+                }
+                '/' if self.peek_second() == Some('/') => self.line_comment(),
+                '/' if self.peek_second() == Some('*') => {
+                    let line_before = self.line;
+                    self.block_comment()?;
+                    if self.line != line_before {
+                        newline = true; // a block comment spanning lines acts as a newline
+                    }
+                }
+                _ => {
+                    let tok = self.scan_token()?;
+                    if newline
+                        && tokens.last().map_or(false, |t| ends_statement(t.ty))
+                        && !continues_expression(tok.ty)
+                    {
+                        let (l, c) = (tok.line, tok.col);
+                        tokens.push(synthetic_semicolon(l, c));
+                    }
+                    newline = false;
+                    tokens.push(tok);
+                }
+            }
+        }
+        // A semicolon is also inserted at the end of the input, so files and
+        // REPL lines that omit the trailing ';' are still complete programs.
+        if tokens.last().map_or(false, |t| ends_statement(t.ty)) {
+            let (l, c) = (self.line, self.col);
+            tokens.push(synthetic_semicolon(l, c));
+        }
+        tokens.push(Token {
+            ty: TokenType::Eof,
+            lexeme: String::new(),
+            lit: None,
+            line: self.line,
+            col: self.col,
+        });
+        Ok(tokens)
+    }
+
+    /// Scan one non-trivia token: identifier, number, string or operator.
+    fn scan_token(&mut self) -> Result<Token, RscpError> {
+        match self.peek() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => Ok(self.identifier()),
+            Some(c) if c.is_ascii_digit() => self.number(),
+            Some('"') => self.string(),
+            Some('.') if self.peek_second().map_or(false, |c| c.is_ascii_digit()) => self.number(),
+            _ => self.operator(),
+        }
+    }
+
+    // ---- low-level cursor helpers -------------------------------------
+
+    fn peek(&self) -> Option<char> {
+        self.src[self.pos..].chars().next()
+    }
+
+    fn peek_second(&self) -> Option<char> {
+        let mut it = self.src[self.pos..].chars();
+        it.next();
+        it.next()
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        let c = self.src[self.pos..].chars().next()?;
+        self.pos += c.len_utf8();
+        if c == '\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+        Some(c)
+    }
+
+    fn tok(&self, ty: TokenType, start: usize, line: usize, col: usize, lit: Option<Lit>) -> Token {
+        Token {
+            ty,
+            lexeme: self.src[start..self.pos].to_string(),
+            lit,
+            line,
+            col,
+        }
+    }
+
+    // ---- token scanners -------------------------------------------------
+
+    fn line_comment(&mut self) {
+        while let Some(c) = self.peek() {
+            if c == '\n' {
+                break;
+            }
+            self.advance();
+        }
+    }
+
+    fn block_comment(&mut self) -> Result<(), RscpError> {
+        let (sl, sc) = (self.line, self.col);
+        self.advance(); // '/'
+        self.advance(); // '*'
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(RscpError::lex(
+                        "unterminated block comment (missing '*/')",
+                        sl,
+                        sc,
+                    ))
+                }
+                Some('*') if self.peek_second() == Some('/') => {
+                    self.advance();
+                    self.advance();
+                    return Ok(());
+                }
+                Some(_) => {
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    fn identifier(&mut self) -> Token {
+        let (start, line, col) = (self.pos, self.line, self.col);
+        while let Some(c) = self.peek() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let text = &self.src[start..self.pos];
+        let ty = keyword(text).unwrap_or(TokenType::Ident);
+        self.tok(ty, start, line, col, None)
+    }
+
+    fn number(&mut self) -> Result<Token, RscpError> {
+        let (start, line, col) = (self.pos, self.line, self.col);
+
+        // Hexadecimal integers: 0x1F, 0X_ff
+        if self.peek() == Some('0')
+            && matches!(self.peek_second(), Some('x' | 'X'))
+        {
+            self.advance(); // 0
+            self.advance(); // x
+            let digits_start = self.pos;
+            while matches!(self.peek(), Some(c) if c.is_ascii_hexdigit() || c == '_') {
+                self.advance();
+            }
+            let digits: String = self.src[digits_start..self.pos]
+                .chars()
+                .filter(|&c| c != '_')
+                .collect();
+            if digits.is_empty() {
+                return Err(RscpError::lex("invalid hex literal: no digits after '0x'", line, col));
+            }
+            if self.starts_identifier() {
+                return Err(RscpError::lex("invalid characters after hex literal", self.line, self.col));
+            }
+            let value = i64::from_str_radix(&digits, 16)
+                .map_err(|_| RscpError::lex("hex integer literal is too large", line, col))?;
+            return Ok(self.tok(TokenType::Int, start, line, col, Some(Lit::Int(value))));
+        }
+
+        let mut is_float = false;
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit() || c == '_') {
+            self.advance();
+        }
+        // A '.' starts the fraction unless it is the first dot of a range
+        // (`1..5` is the int 1 followed by '..').
+        if self.peek() == Some('.') && self.peek_second() != Some('.') {
+            is_float = true;
+            self.advance();
+            while matches!(self.peek(), Some(c) if c.is_ascii_digit() || c == '_') {
+                self.advance();
+            }
+        }
+        if matches!(self.peek(), Some('e' | 'E')) {
+            // Only treat as exponent when followed by digits or sign+digits.
+            let second = self.peek_second();
+            let exponent = match second {
+                Some(c) if c.is_ascii_digit() => true,
+                Some('+') | Some('-') => {
+                    let mut it = self.src[self.pos..].chars();
+                    it.next();
+                    it.next();
+                    matches!(it.next(), Some(c) if c.is_ascii_digit())
+                }
+                _ => false,
+            };
+            if exponent {
+                is_float = true;
+                self.advance(); // e
+                if matches!(self.peek(), Some('+' | '-')) {
+                    self.advance();
+                }
+                while matches!(self.peek(), Some(c) if c.is_ascii_digit() || c == '_') {
+                    self.advance();
+                }
+            }
+        }
+        if self.starts_identifier() {
+            return Err(RscpError::lex(
+                "invalid characters after number literal",
+                self.line,
+                self.col,
+            ));
+        }
+
+        let mut text: String = self.src[start..self.pos]
+            .chars()
+            .filter(|&c| c != '_')
+            .collect();
+        let lit = if is_float {
+            if text.ends_with('.') {
+                text.push('0'); // "5." -> "5.0"
+            }
+            if text.starts_with('.') {
+                text.insert(0, '0'); // ".5" -> "0.5"
+            }
+            let value: f64 = text
+                .parse()
+                .map_err(|_| RscpError::lex("invalid float literal", line, col))?;
+            Lit::Float(value)
+        } else {
+            let value: i64 = text
+                .parse()
+                .map_err(|_| RscpError::lex("integer literal is too large (max is i64)", line, col))?;
+            Lit::Int(value)
+        };
+        Ok(self.tok(
+            if is_float { TokenType::Float } else { TokenType::Int },
+            start,
+            line,
+            col,
+            Some(lit),
+        ))
+    }
+
+    /// True when the cursor sits on a character that can start an identifier.
+    fn starts_identifier(&self) -> bool {
+        matches!(self.peek(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+    }
+
+    fn string(&mut self) -> Result<Token, RscpError> {
+        let (start, line, col) = (self.pos, self.line, self.col);
+        self.advance(); // opening quote
+        let mut value = String::new();
+        loop {
+            match self.peek() {
+                None | Some('\n') => {
+                    return Err(RscpError::lex(
+                        "unterminated string literal (missing '\"')",
+                        line,
+                        col,
+                    ))
+                }
+                Some('"') => {
+                    self.advance();
+                    return Ok(self.tok(TokenType::Str, start, line, col, Some(Lit::Str(value))));
+                }
+                Some('\\') => {
+                    let (el, ec) = (self.line, self.col);
+                    self.advance();
+                    let escaped = match self.advance() {
+                        Some('n') => '\n',
+                        Some('t') => '\t',
+                        Some('r') => '\r',
+                        Some('0') => '\0',
+                        Some('\\') => '\\',
+                        Some('"') => '"',
+                        Some('\'') => '\'',
+                        Some(other) => {
+                            return Err(RscpError::lex(
+                                format!("unknown escape sequence '\\{other}'"),
+                                el,
+                                ec,
+                            ))
+                        }
+                        None => {
+                            return Err(RscpError::lex(
+                                "unterminated string literal (missing '\"')",
+                                line,
+                                col,
+                            ))
+                        }
+                    };
+                    value.push(escaped);
+                }
+                Some(_) => {
+                    value.push(self.advance().unwrap());
+                }
+            }
+        }
+    }
+
+    fn operator(&mut self) -> Result<Token, RscpError> {
+        use TokenType::*;
+        let (start, line, col) = (self.pos, self.line, self.col);
+        let c = self.advance().unwrap();
+        let second = self.peek();
+
+        let ty = match c {
+            '(' => LParen,
+            ')' => RParen,
+            '{' => LBrace,
+            '}' => RBrace,
+            '[' => LBracket,
+            ']' => RBracket,
+            ',' => Comma,
+            ';' => Semicolon,
+            ':' => Colon,
+            '?' => Question,
+            '.' => match second {
+                Some('.') => {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        DotDotEq
+                    } else {
+                        DotDot
+                    }
+                }
+                _ => {
+                    return Err(RscpError::lex(
+                        "unexpected character '.' (a lone '.' is not valid; use '..' for ranges)",
+                        line,
+                        col,
+                    ))
+                }
+            },
+            '+' => match second {
+                Some('+') => {
+                    self.advance();
+                    PlusPlus
+                }
+                Some('=') => {
+                    self.advance();
+                    PlusAssign
+                }
+                _ => Plus,
+            },
+            '-' => match second {
+                Some('-') => {
+                    self.advance();
+                    MinusMinus
+                }
+                Some('=') => {
+                    self.advance();
+                    MinusAssign
+                }
+                Some('>') => {
+                    self.advance();
+                    Arrow
+                }
+                _ => Minus,
+            },
+            '*' => match second {
+                Some('=') => {
+                    self.advance();
+                    StarAssign
+                }
+                _ => Star,
+            },
+            '/' => match second {
+                Some('=') => {
+                    self.advance();
+                    SlashAssign
+                }
+                _ => Slash,
+            },
+            '%' => match second {
+                Some('=') => {
+                    self.advance();
+                    PercentAssign
+                }
+                _ => Percent,
+            },
+            '=' => match second {
+                Some('=') => {
+                    self.advance();
+                    EqEq
+                }
+                _ => Assign,
+            },
+            '!' => match second {
+                Some('=') => {
+                    self.advance();
+                    NotEq
+                }
+                _ => Not,
+            },
+            '<' => match second {
+                Some('=') => {
+                    self.advance();
+                    Le
+                }
+                _ => Lt,
+            },
+            '>' => match second {
+                Some('=') => {
+                    self.advance();
+                    Ge
+                }
+                _ => Gt,
+            },
+            '&' => match second {
+                Some('&') => {
+                    self.advance();
+                    AndAnd
+                }
+                _ => {
+                    return Err(RscpError::lex(
+                        "unexpected character '&' (did you mean '&&'?)",
+                        line,
+                        col,
+                    ))
+                }
+            },
+            '|' => match second {
+                Some('|') => {
+                    self.advance();
+                    OrOr
+                }
+                // A single '|' opens the parameter list of a short closure.
+                _ => Pipe,
+            },
+            other => {
+                return Err(RscpError::lex(
+                    format!("unexpected character '{other}'"),
+                    line,
+                    col,
+                ))
+            }
+        };
+        Ok(self.tok(ty, start, line, col, None))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::token::TokenType::*;
+
+    fn lex(src: &str) -> Vec<Token> {
+        Lexer::new(src).tokenize().unwrap()
+    }
+
+    fn types(src: &str) -> Vec<TokenType> {
+        // Ignore the `;` synthesized by automatic insertion so tests can
+        // focus on the written tokens.
+        lex(src)
+            .into_iter()
+            .filter(|t| t.lexeme != "\n")
+            .map(|t| t.ty)
+            .collect()
+    }
+
+    #[test]
+    fn keywords_and_idents() {
+        let ts = types("let var fn true false null while for in loop");
+        assert_eq!(
+            ts,
+            vec![Let, Var, Fn, True, False, Null, While, For, In, Loop, Eof]
+        );
+        let ts = types("letx for_ _if fn2 loopx");
+        assert_eq!(ts, vec![Ident, Ident, Ident, Ident, Ident, Eof]);
+    }
+
+    #[test]
+    fn positions() {
+        let ts = lex("let x = 1;\n  var y;");
+        assert_eq!((ts[0].line, ts[0].col), (1, 1)); // let
+        assert_eq!((ts[1].line, ts[1].col), (1, 5)); // x
+        assert_eq!((ts[3].line, ts[3].col), (1, 9)); // 1
+        assert_eq!((ts[5].line, ts[5].col), (2, 3)); // var
+        assert_eq!((ts[6].line, ts[6].col), (2, 7)); // y
+    }
+
+    #[test]
+    fn numbers() {
+        let ts = lex("42 1.5 .5 5. 1e3 1.5e-2 0x1F 0xFF_AA 1_000");
+        let lits: Vec<String> = ts
+            .iter()
+            .filter(|t| t.lit.is_some())
+            .map(|t| match t.lit.as_ref().unwrap() {
+                Lit::Int(i) => format!("i{i}"),
+                Lit::Float(f) => format!("f{f:?}"),
+                Lit::Str(s) => format!("s{s}"),
+            })
+            .collect();
+        assert_eq!(
+            lits,
+            vec![
+                "i42", "f1.5", "f0.5", "f5.0", "f1000.0", "f0.015", "i31", "i65450", "i1000"
+            ]
+        );
+    }
+
+    #[test]
+    fn strings_and_escapes() {
+        let ts = lex("\"a\\nb\\t\\\\ \\\"c\\\" \\0\\r\"");
+        match &ts[0].lit {
+            Some(Lit::Str(s)) => assert_eq!(s, "a\nb\t\\ \"c\" \0\r"),
+            other => panic!("bad lit: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn operators() {
+        let ts = types("+ ++ += == = != <= < && || ! ++-- -> .. ..= | |x|");
+        assert_eq!(
+            ts,
+            vec![
+                Plus, PlusPlus, PlusAssign, EqEq, Assign, NotEq, Le, Lt, AndAnd, OrOr, Not,
+                PlusPlus, MinusMinus, Arrow, DotDot, DotDotEq, Pipe, Pipe, Ident, Pipe, Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn ranges_not_floats() {
+        // `1..5` must lex as int 1, '..', int 5 — not as floats.
+        let ts = types("1..5 0..=9 1.5..2");
+        assert_eq!(ts, vec![Int, DotDot, Int, Int, DotDotEq, Int, Float, DotDot, Int, Eof]);
+    }
+
+    #[test]
+    fn comments() {
+        let ts = lex("// line\n1 /* block */ 2");
+        let kinds: Vec<crate::token::TokenType> = ts.iter().map(|t| t.ty).collect();
+        assert_eq!(kinds, vec![crate::token::TokenType::Int, crate::token::TokenType::Int, crate::token::TokenType::Semicolon, crate::token::TokenType::Eof]);
+        assert_eq!((ts[1].line, ts[1].col), (2, 15));
+        // A block comment containing a newline acts like a newline.
+        let ts = lex("1 /* two\nlines */ 2");
+        let kinds: Vec<crate::token::TokenType> = ts.iter().map(|t| t.ty).collect();
+        assert_eq!(kinds, vec![crate::token::TokenType::Int, crate::token::TokenType::Semicolon, crate::token::TokenType::Int, crate::token::TokenType::Semicolon, crate::token::TokenType::Eof]);
+    }
+
+    #[test]
+    fn asi_inserts_at_newline() {
+        // A value at end of line -> a ';' is synthesized.
+        let ts = lex("let x = 1\nlet y = 2\n");
+        let semis = ts.iter().filter(|t| t.ty == Semicolon).count();
+        assert_eq!(semis, 2); // one per line (plus none needed at EOF)
+        // Explicit ';' still works and is not duplicated.
+        let ts = lex("let x = 1;\nlet y = 2;\n");
+        let semis = ts.iter().filter(|t| t.ty == Semicolon).count();
+        assert_eq!(semis, 2);
+    }
+
+    #[test]
+    fn asi_at_end_of_input() {
+        // No trailing newline: the input still ends with a synthesized ';'.
+        let ts = lex("var x = 1");
+        assert_eq!(ts[ts.len() - 2].ty, Semicolon);
+        // Incomplete constructs are left open for the REPL.
+        let ts = lex("let x = 1 +");
+        assert_eq!(ts.last().unwrap().ty, Eof);
+        assert!(!ts.iter().any(|t| t.ty == Semicolon));
+    }
+
+    #[test]
+    fn asi_continues_lines() {
+        // Operator/closer at line start: continuation, no insertion *inside*
+        // the construct (a final ';' before end of input is expected).
+        let inner = |src: &str| -> usize {
+            let ts = lex(src);
+            let last_is_semi = ts.len() >= 2 && ts[ts.len() - 2].ty == Semicolon;
+            let total = ts.iter().filter(|t| t.ty == Semicolon).count();
+            total - if last_is_semi { 1 } else { 0 }
+        };
+        for src in [
+            "var x = 1 +\n    2",
+            "var m = {\n    \"a\": 1,\n}",
+            "var a = [\n    1,\n    2,\n]",
+            "f(\n    a,\n    b,\n)",
+            "if done {\n    break\n} else {\n    continue\n}",
+            "var y = a[\n    1\n]",
+            "let f = |x|\n    x + 1",
+        ] {
+            assert_eq!(inner(src), 0, "unexpected insertion inside:\n{src}");
+        }
+        // A plain value at end of line does terminate the statement.
+        assert_eq!(inner("var x = 1\nvar y = 2"), 1);
+    }
+
+    #[test]
+    fn errors() {
+        assert!(Lexer::new("\"unterminated").tokenize().is_err());
+        assert!(Lexer::new("\"bad \\q escape\"").tokenize().is_err());
+        assert!(Lexer::new("/* never closed").tokenize().is_err());
+        assert!(Lexer::new("let a = $;").tokenize().is_err());
+        assert!(Lexer::new("0x").tokenize().is_err());
+        assert!(Lexer::new("99999999999999999999999").tokenize().is_err());
+        assert!(Lexer::new("let a = .;").tokenize().is_err()); // lone '.'
+    }
+}

@@ -1,0 +1,14 @@
+let m = {"one": 1, "two": 2};
+println(m);
+println(m["one"], len(m));
+m["three"] = 3;
+println(m, len(m));
+println(has(m, "two"), has(m, "four"));
+println(keys(m));
+for (let k in keys(m)) { print(k); print(" "); }
+println();
+m["one"] += 10;
+println(m["one"]);
+let nested = {"list": [1, 2], "map": {"x": 1}};
+println(nested["list"][1], nested["map"]["x"]);
+println(nested);

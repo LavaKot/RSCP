@@ -1,0 +1,6 @@
+// Trailing commas are allowed everywhere since 2026.2.0.0.
+let a = [1, 2, 3,]
+let m = {"k": 1,}
+fn f(x,) -> x
+let g = |x,| x
+println(f(a[2]), m["k"], g(9,))

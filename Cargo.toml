@@ -1,0 +1,12 @@
+[package]
+name = "rscp"
+version = "2026.2.0"
+edition = "2021"
+
+[[bin]]
+name = "rscp"
+path = "src/main.rscp"
+
+[[test]]
+name = "golden"
+path = "tests/golden.rscp"

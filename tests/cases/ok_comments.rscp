@@ -1,0 +1,4 @@
+// Nothing but comments and an empty block.
+/* block
+   comment */
+{ }

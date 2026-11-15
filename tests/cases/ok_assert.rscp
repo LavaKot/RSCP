@@ -1,0 +1,5 @@
+assert(true);
+assert(1 + 1 == 2, "math works");
+var checks = 0;
+for (let v in [1, 2, 3]) { assert(v > 0); checks++; }
+println("all", checks, "assertions passed");

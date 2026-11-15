@@ -1,0 +1,13 @@
+let words = ["rscp", "is", "fun"];
+for (let w in words) { println(w); }
+var total = 0;
+for (let v in [10, 20, 30]) { total += v; }
+println(total);
+let grid = [[1, 2], [3, 4]];
+for (let row in grid) {
+    var line = "";
+    for (let cell in row) { line += str(cell) + " "; }
+    println(line);
+}
+let m = {"a": 1, "b": 2};
+for (let k in keys(m)) { println(k, "=>", m[k]); }

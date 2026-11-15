@@ -1,0 +1,8 @@
+// No semicolons, no parentheses around conditions.
+var total = 0
+for i in 0..10 {
+    if i % 2 == 0 { continue }
+    if total > 20 { break }
+    total += i
+}
+println(total)

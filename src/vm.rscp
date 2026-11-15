@@ -1,0 +1,837 @@
+//! The stack-based virtual machine.
+//!
+//! Design: each call pushes a [`Frame`] with its own instruction pointer;
+//! locals live in the value stack above the callee slot (slot 0 of a frame
+//! is the running closure itself). Closures capture locals through shared
+//! [`Upvalue`] cells that start "open" (pointing at a stack slot) and close
+//! (copying the value) when the defining scope exits.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::bytecode::{Chunk, FnProto, Op};
+use crate::errors::{RscpError, TraceFrame};
+use crate::value::{FunctionVal, Upvalue, Value};
+
+/// Maximum call depth before a "stack overflow" runtime error.
+const MAX_FRAMES: usize = 1024;
+
+/// A global binding and its mutability.
+pub struct GlobalCell {
+    pub value: Value,
+    pub mutable: bool,
+}
+
+struct Frame {
+    func: Rc<FunctionVal>,
+    /// Resume point (instruction index) saved while a callee runs.
+    ip: usize,
+    /// Stack index of the callee slot; locals start at `base + 1`.
+    base: usize,
+}
+
+pub struct Vm {
+    pub stack: Vec<Value>,
+    frames: Vec<Frame>,
+    pub globals: HashMap<String, GlobalCell>,
+    open_upvalues: Vec<(usize, Rc<RefCell<Upvalue>>)>,
+    /// REPL mode: allow redefining and reassigning top-level bindings.
+    pub repl: bool,
+    /// When true, `print`/`println` produce no output (used by tests).
+    pub quiet: bool,
+    rng: u64,
+}
+
+impl Default for Vm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Vm {
+    pub fn new() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9e3779b97f4a7c15)
+            | 1; // xorshift state must be non-zero
+        let mut vm = Vm {
+            stack: Vec::with_capacity(256),
+            frames: Vec::with_capacity(64),
+            globals: HashMap::new(),
+            open_upvalues: Vec::new(),
+            repl: false,
+            quiet: false,
+            rng: seed,
+        };
+        crate::builtins::install(&mut vm);
+        vm
+    }
+
+    pub fn define_native(&mut self, name: &'static str, func: crate::value::NativeFn) {
+        self.globals.insert(
+            name.to_string(),
+            GlobalCell {
+                value: Value::Native(Rc::new(crate::value::NativeVal { name, func })),
+                mutable: false,
+            },
+        );
+    }
+
+    /// Execute a compiled script. After the top level finishes, if a global
+    /// function `main` exists it is called with no arguments.
+    pub fn run_script(&mut self, proto: Rc<FnProto>) -> Result<(), RscpError> {
+        self.run_frameless(proto)?;
+        if !self.repl {
+            if let Some(cell) = self.globals.get("main") {
+                match &cell.value {
+                    Value::Func(f) if f.proto.arity == 0 => {
+                        let func = f.clone();
+                        self.run_frameless(func.proto.clone())?;
+                    }
+                    Value::Func(_) => {
+                        return Err(RscpError::runtime("'main' must take no arguments", 0));
+                    }
+                    other => {
+                        return Err(RscpError::runtime(
+                            format!("'main' is defined but is not a function (it is a {})", other.type_name()),
+                            0,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Push a fresh frame for `proto` and run until it returns.
+    fn run_frameless(&mut self, proto: Rc<FnProto>) -> Result<(), RscpError> {
+        self.stack.clear();
+        self.frames.clear();
+        let func = Rc::new(FunctionVal { proto, upvalues: Vec::new() });
+        self.stack.push(Value::Func(Rc::clone(&func)));
+        self.frames.push(Frame { func, ip: 0, base: 0 });
+        self.exec()
+    }
+
+    /// The main interpreter loop. `continue 'outer` re-enters after a frame
+    /// switch (call or return); the inner loop borrows the current chunk
+    /// through a local `Rc` clone, so pushing frames never fights the borrow.
+    fn exec(&mut self) -> Result<(), RscpError> {
+        // Expands to: sync the current frame's ip, then return a runtime
+        // error with a full stack trace. `self` resolves at the expansion
+        // site; the failing instruction index must be passed in because
+        // macro hygiene hides surrounding locals.
+        macro_rules! rt {
+            ($op_ip:expr, $msg:expr) => {{
+                self.frames.last_mut().unwrap().ip = $op_ip;
+                return Err(rt_error(self, $msg));
+            }};
+        }
+
+        'outer: loop {
+            let frame = self.frames.last().unwrap();
+            let func = Rc::clone(&frame.func);
+            let mut ip = frame.ip;
+            let base = frame.base;
+            let chunk: &Chunk = &func.proto.chunk;
+
+            loop {
+                let op_ip = ip;
+                let byte = chunk.code[ip];
+                ip += 1;
+                let op = match Op::from_byte(byte) {
+                    Some(op) => op,
+                    None => rt!(op_ip, format!("corrupt bytecode: unknown opcode {byte}")),
+                };
+                match op {
+                    Op::Constant => {
+                        let ci = read_u16(chunk, &mut ip);
+                        let v = chunk.consts[ci as usize].clone();
+                        self.stack.push(v);
+                    }
+                    Op::Null => self.stack.push(Value::Null),
+                    Op::True => self.stack.push(Value::Bool(true)),
+                    Op::False => self.stack.push(Value::Bool(false)),
+                    Op::Pop => {
+                        if self.stack.len() <= base {
+                            rt!(op_ip, "internal error: stack underflow in Pop");
+                        }
+                        let new_len = self.stack.len() - 1;
+                        self.close_upvalues_ge(new_len);
+                        self.stack.truncate(new_len);
+                    }
+                    Op::PopN => {
+                        let n = chunk.code[ip] as usize;
+                        ip += 1;
+                        if self.stack.len() < base + n {
+                            rt!(op_ip, "internal error: stack underflow in PopN");
+                        }
+                        let new_len = self.stack.len() - n;
+                        self.close_upvalues_ge(new_len);
+                        self.stack.truncate(new_len);
+                    }
+                    Op::GetLocal => {
+                        let slot = chunk.code[ip] as usize;
+                        ip += 1;
+                        let v = self.stack[base + slot].clone();
+                        self.stack.push(v);
+                    }
+                    Op::SetLocal => {
+                        let slot = chunk.code[ip] as usize;
+                        ip += 1;
+                        let v = self.stack.pop().unwrap();
+                        self.stack[base + slot] = v;
+                    }
+                    Op::GetUpvalue => {
+                        let idx = chunk.code[ip] as usize;
+                        ip += 1;
+                        let cell = Rc::clone(&func.upvalues[idx]);
+                        let v = self.upvalue_read(&cell);
+                        self.stack.push(v);
+                    }
+                    Op::SetUpvalue => {
+                        let idx = chunk.code[ip] as usize;
+                        ip += 1;
+                        let v = self.stack.pop().unwrap();
+                        let cell = Rc::clone(&func.upvalues[idx]);
+                        self.upvalue_write(&cell, v);
+                    }
+                    Op::DefineGlobal | Op::DefineGlobalConst => {
+                        let ci = read_u16(chunk, &mut ip);
+                        let v = self.stack.pop().unwrap();
+                        let name = match &chunk.consts[ci as usize] {
+                            Value::Str(s) => s.to_string(),
+                            _ => rt!(op_ip, "internal error: global name constant is not a string"),
+                        };
+                        self.globals.insert(
+                            name,
+                            GlobalCell { value: v, mutable: op == Op::DefineGlobal },
+                        );
+                    }
+                    Op::GetGlobal => {
+                        let ci = read_u16(chunk, &mut ip);
+                        let name = match &chunk.consts[ci as usize] {
+                            Value::Str(s) => s.to_string(),
+                            _ => rt!(op_ip, "internal error: global name constant is not a string"),
+                        };
+                        match self.globals.get(&name) {
+                            Some(cell) => {
+                                let v = cell.value.clone();
+                                self.stack.push(v);
+                            }
+                            None => rt!(op_ip, format!("undefined variable '{name}'")),
+                        }
+                    }
+                    Op::SetGlobal => {
+                        let ci = read_u16(chunk, &mut ip);
+                        let v = self.stack.pop().unwrap();
+                        let name = match &chunk.consts[ci as usize] {
+                            Value::Str(s) => s.to_string(),
+                            _ => rt!(op_ip, "internal error: global name constant is not a string"),
+                        };
+                        match self.globals.get_mut(&name) {
+                            None => rt!(op_ip, format!("undefined variable '{name}'")),
+                            Some(cell) => {
+                                if !cell.mutable && !self.repl {
+                                    rt!(op_ip, format!(
+                                        "cannot assign to immutable variable '{name}' (declared with 'let')"
+                                    ));
+                                }
+                                cell.value = v;
+                            }
+                        }
+                    }
+                    Op::Equal => {
+                        let rhs = self.stack.pop().unwrap();
+                        let lhs = self.stack.pop().unwrap();
+                        self.stack.push(Value::Bool(lhs.equals(&rhs)));
+                    }
+                    Op::Greater | Op::Less | Op::Le | Op::Ge => {
+                        let rhs = self.stack.pop().unwrap();
+                        let lhs = self.stack.pop().unwrap();
+                        let ord = match Value::num_cmp(&lhs, &rhs) {
+                            Some(ord) => ord,
+                            None => rt!(op_ip, format!(
+                                "cannot compare {} and {} with '{}'",
+                                lhs.type_name(),
+                                rhs.type_name(),
+                                match op {
+                                    Op::Greater => ">",
+                                    Op::Less => "<",
+                                    Op::Le => "<=",
+                                    _ => ">=",
+                                }
+                            )),
+                        };
+                        use std::cmp::Ordering::*;
+                        let b = match op {
+                            Op::Greater => ord == Greater,
+                            Op::Less => ord == Less,
+                            Op::Le => ord != Greater,
+                            _ => ord != Less,
+                        };
+                        self.stack.push(Value::Bool(b));
+                    }
+                    Op::Not => {
+                        let v = self.stack.pop().unwrap();
+                        match v {
+                            Value::Bool(b) => self.stack.push(Value::Bool(!b)),
+                            other => rt!(op_ip, format!(
+                                "the operand of '!' must be bool, got {}",
+                                other.type_name()
+                            )),
+                        }
+                    }
+                    Op::Negate => {
+                        let v = self.stack.pop().unwrap();
+                        match v {
+                            Value::Int(i) => match i.checked_neg() {
+                                Some(n) => self.stack.push(Value::Int(n)),
+                                None => rt!(op_ip, "integer overflow in unary '-'"),
+                            },
+                            Value::Float(f) => self.stack.push(Value::Float(-f)),
+                            other => rt!(op_ip, format!(
+                                "the operand of unary '-' must be a number, got {}",
+                                other.type_name()
+                            )),
+                        }
+                    }
+                    Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
+                        let rhs = self.stack.pop().unwrap();
+                        let lhs = self.stack.pop().unwrap();
+                        match arith(op, lhs, rhs) {
+                            Ok(v) => self.stack.push(v),
+                            Err(msg) => rt!(op_ip, msg),
+                        }
+                    }
+                    Op::Jump => {
+                        let t = read_u16(chunk, &mut ip) as usize;
+                        ip = t;
+                    }
+                    Op::JumpIfFalsePeek | Op::JumpIfTruePeek => {
+                        let t = read_u16(chunk, &mut ip) as usize;
+                        let v = self.stack.last().cloned().unwrap_or(Value::Null);
+                        match v {
+                            Value::Bool(b) => {
+                                let jump = if op == Op::JumpIfFalsePeek { !b } else { b };
+                                if jump {
+                                    ip = t;
+                                }
+                            }
+                            other => rt!(op_ip, format!(
+                                "expected a bool, got {} (conditions and '&&'/'||' operands must be bool)",
+                                other.type_name()
+                            )),
+                        }
+                    }
+                    Op::Loop => {
+                        let t = read_u16(chunk, &mut ip) as usize;
+                        ip = t;
+                    }
+                    Op::Call => {
+                        let argc = chunk.code[ip] as usize;
+                        ip += 1;
+                        if self.stack.len() < argc + 1 {
+                            rt!(op_ip, "internal error: stack underflow in Call");
+                        }
+                        let callee_pos = self.stack.len() - argc - 1;
+                        let callee = self.stack[callee_pos].clone();
+                        match callee {
+                            Value::Native(native) => {
+                                let args: Vec<Value> =
+                                    self.stack.drain(callee_pos + 1..).collect();
+                                self.stack.truncate(callee_pos);
+                                let res = (native.func)(self, args);
+                                match res {
+                                    Ok(v) => self.stack.push(v),
+                                    Err(msg) => rt!(op_ip, msg),
+                                }
+                            }
+                            Value::Func(f) => {
+                                if f.proto.arity as usize != argc {
+                                    let name = if f.proto.name.is_empty() {
+                                        "<anonymous>".to_string()
+                                    } else {
+                                        f.proto.name.clone()
+                                    };
+                                    rt!(op_ip, format!(
+                                        "function '{}' expects {} argument(s), got {}",
+                                        name, f.proto.arity, argc
+                                    ));
+                                }
+                                if self.frames.len() >= MAX_FRAMES {
+                                    rt!(op_ip, format!(
+                                        "stack overflow: call depth exceeded {MAX_FRAMES} frames"
+                                    ));
+                                }
+                                self.frames.last_mut().unwrap().ip = ip;
+                                self.frames.push(Frame { func: Rc::clone(&f), ip: 0, base: callee_pos });
+                                continue 'outer;
+                            }
+                            other => rt!(op_ip, format!(
+                                "only functions can be called, got {}",
+                                other.type_name()
+                            )),
+                        }
+                    }
+                    Op::Closure => {
+                        let ci = read_u16(chunk, &mut ip);
+                        let proto = match &chunk.consts[ci as usize] {
+                            Value::Proto(p) => Rc::clone(p),
+                            _ => rt!(op_ip, "internal error: Closure constant is not a prototype"),
+                        };
+                        let mut upvalues = Vec::with_capacity(proto.upvalues.len());
+                        // One (is_local, index) descriptor pair per captured
+                        // variable follows the constant index in the stream.
+                        for _ in 0..proto.upvalues.len() {
+                            let is_local = chunk.code[ip] == 1;
+                            let idx = chunk.code[ip + 1] as usize;
+                            ip += 2;
+                            if is_local {
+                                upvalues.push(self.capture_upvalue(base + idx));
+                            } else {
+                                let cell = Rc::clone(&func.upvalues[idx]);
+                                upvalues.push(cell);
+                            }
+                        }
+                        self.stack.push(Value::Func(Rc::new(FunctionVal { proto, upvalues })));
+                    }
+                    Op::Return => {
+                        let result = self.stack.pop();
+                        let frame_base = base;
+                        self.close_upvalues_ge(frame_base);
+                        self.stack.truncate(frame_base);
+                        self.frames.pop();
+                        if self.frames.is_empty() {
+                            return Ok(());
+                        }
+                        if let Some(v) = result {
+                            self.stack.push(v);
+                        }
+                        continue 'outer;
+                    }
+                    Op::Array => {
+                        let n = read_u16(chunk, &mut ip) as usize;
+                        let mut items = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            items.push(self.stack.pop().unwrap());
+                        }
+                        items.reverse();
+                        self.stack.push(Value::Array(Rc::new(RefCell::new(items))));
+                    }
+                    Op::Map => {
+                        let n = read_u16(chunk, &mut ip) as usize;
+                        let mut pairs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            let v = self.stack.pop().unwrap();
+                            let k = self.stack.pop().unwrap();
+                            pairs.push((k, v));
+                        }
+                        pairs.reverse();
+                        let mut map = HashMap::with_capacity(n);
+                        for (k, v) in pairs {
+                            match k {
+                                Value::Str(s) => {
+                                    map.insert(s.to_string(), v);
+                                }
+                                other => rt!(op_ip, format!(
+                                    "map keys must be strings, got {}",
+                                    other.type_name()
+                                )),
+                            }
+                        }
+                        self.stack.push(Value::Map(Rc::new(RefCell::new(map))));
+                    }
+                    Op::IndexGet => {
+                        let idx = self.stack.pop().unwrap();
+                        let obj = self.stack.pop().unwrap();
+                        match index_get(obj, idx) {
+                            Ok(v) => self.stack.push(v),
+                            Err(msg) => rt!(op_ip, msg),
+                        }
+                    }
+                    Op::IndexSet => {
+                        let value = self.stack.pop().unwrap();
+                        let idx = self.stack.pop().unwrap();
+                        let obj = self.stack.pop().unwrap();
+                        match index_set(obj, idx, value) {
+                            Ok(()) => {}
+                            Err(msg) => rt!(op_ip, msg),
+                        }
+                    }
+                    Op::IndexGetKeep => {
+                        // obj and idx stay on the stack; the element is
+                        // pushed on top (compound assignment support).
+                        let idx = self.stack.last().cloned().unwrap_or(Value::Null);
+                        let obj = self
+                            .stack
+                            .get(self.stack.len().wrapping_sub(2))
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                        match index_get(obj, idx) {
+                            Ok(v) => self.stack.push(v),
+                            Err(msg) => rt!(op_ip, msg),
+                        }
+                    }
+                    Op::ArrayLen => {
+                        let v = self.stack.pop().unwrap();
+                        match v {
+                            Value::Array(a) => {
+                                let n = a.borrow().len() as i64;
+                                self.stack.push(Value::Int(n));
+                            }
+                            other => rt!(op_ip, format!(
+                                "for-in requires an array, got {}",
+                                other.type_name()
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- upvalues ----------------------------------------------------------
+
+    fn upvalue_read(&self, cell: &Rc<RefCell<Upvalue>>) -> Value {
+        match &*cell.borrow() {
+            Upvalue::Open(i) => self.stack[*i].clone(),
+            Upvalue::Closed(v) => v.clone(),
+        }
+    }
+
+    fn upvalue_write(&mut self, cell: &Rc<RefCell<Upvalue>>, v: Value) {
+        let open_idx = match &*cell.borrow() {
+            Upvalue::Open(i) => Some(*i),
+            Upvalue::Closed(_) => None,
+        };
+        match open_idx {
+            Some(i) => self.stack[i] = v,
+            None => *cell.borrow_mut() = Upvalue::Closed(v),
+        }
+    }
+
+    /// Find or create the shared open-upvalue cell for stack slot `slot`.
+    fn capture_upvalue(&mut self, slot: usize) -> Rc<RefCell<Upvalue>> {
+        for (s, cell) in &self.open_upvalues {
+            if *s == slot {
+                return Rc::clone(cell);
+            }
+        }
+        let cell = Rc::new(RefCell::new(Upvalue::Open(slot)));
+        self.open_upvalues.push((slot, Rc::clone(&cell)));
+        cell
+    }
+
+    /// Close every open upvalue pointing at or above `from`: the owning
+    /// stack slots are going away, so the cells take ownership of the values.
+    pub fn close_upvalues_ge(&mut self, from: usize) {
+        if self.open_upvalues.is_empty() {
+            return;
+        }
+        let mut i = 0;
+        while i < self.open_upvalues.len() {
+            let (slot, cell) = &self.open_upvalues[i];
+            if *slot >= from {
+                let v = self.stack[*slot].clone();
+                *cell.borrow_mut() = Upvalue::Closed(v);
+                self.open_upvalues.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Pseudo-random float in [0, 1) (xorshift64*), used by `rand()`.
+    pub fn next_rand(&mut self) -> f64 {
+        let mut x = self.rng;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.rng = x;
+        let v = x.wrapping_mul(0x2545f4914f6cdd1d);
+        (v >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+fn read_u16(chunk: &Chunk, ip: &mut usize) -> u16 {
+    let v = u16::from(chunk.code[*ip]) | (u16::from(chunk.code[*ip + 1]) << 8);
+    *ip += 2;
+    v
+}
+
+/// Arithmetic for the Add/Sub/Mul/Div/Mod opcodes. Ints are exact (with
+/// overflow and division-by-zero errors); mixing int and float promotes to
+/// float; `+` also concatenates strings and arrays.
+fn arith(op: Op, lhs: Value, rhs: Value) -> Result<Value, String> {
+    let symbol = match op {
+        Op::Add => "+",
+        Op::Sub => "-",
+        Op::Mul => "*",
+        Op::Div => "/",
+        _ => "%",
+    };
+    let int_op = |a: i64, b: i64| -> Result<i64, String> {
+        let r = match op {
+            Op::Add => a.checked_add(b),
+            Op::Sub => a.checked_sub(b),
+            Op::Mul => a.checked_mul(b),
+            Op::Div => {
+                if b == 0 {
+                    return Err("division by zero".to_string());
+                }
+                a.checked_div(b)
+            }
+            _ => {
+                if b == 0 {
+                    return Err("modulo by zero".to_string());
+                }
+                a.checked_rem(b)
+            }
+        };
+        r.ok_or_else(|| format!("integer overflow in '{symbol}'"))
+    };
+    match (lhs, rhs) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_op(a, b)?)),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(match op {
+            Op::Add => a + b,
+            Op::Sub => a - b,
+            Op::Mul => a * b,
+            Op::Div => a / b,
+            _ => a % b,
+        })),
+        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(match op {
+            Op::Add => a as f64 + b,
+            Op::Sub => a as f64 - b,
+            Op::Mul => a as f64 * b,
+            Op::Div => a as f64 / b,
+            _ => a as f64 % b,
+        })),
+        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(match op {
+            Op::Add => a + b as f64,
+            Op::Sub => a - b as f64,
+            Op::Mul => a * b as f64,
+            Op::Div => a / b as f64,
+            _ => a % b as f64,
+        })),
+        (Value::Str(a), Value::Str(b)) if op == Op::Add => {
+            let mut s = String::with_capacity(a.len() + b.len());
+            s.push_str(&a);
+            s.push_str(&b);
+            Ok(Value::str(s))
+        }
+        (Value::Array(a), Value::Array(b)) if op == Op::Add => {
+            let mut items = a.borrow().clone();
+            items.extend(b.borrow().iter().cloned());
+            Ok(Value::Array(Rc::new(RefCell::new(items))))
+        }
+        (a, b) => Err(format!(
+            "unsupported operand types for '{symbol}': {} and {}",
+            a.type_name(),
+            b.type_name()
+        )),
+    }
+}
+
+/// Index read: array[int], map[string], string[int] (char index).
+fn index_get(obj: Value, idx: Value) -> Result<Value, String> {
+    match (obj, idx) {
+        (Value::Array(a), Value::Int(i)) => {
+            let items = a.borrow();
+            if i < 0 || i as usize >= items.len() {
+                return Err(format!("index {i} out of bounds for array of length {}", items.len()));
+            }
+            Ok(items[i as usize].clone())
+        }
+        (Value::Map(m), Value::Str(k)) => match m.borrow().get(&*k) {
+            Some(v) => Ok(v.clone()),
+            None => Err(format!("missing key '{k}' in map")),
+        },
+        (Value::Str(s), Value::Int(i)) => {
+            let len = s.chars().count() as i64;
+            if i < 0 || i >= len {
+                return Err(format!("index {i} out of bounds for string of length {len}"));
+            }
+            let ch = s.chars().nth(i as usize).unwrap();
+            Ok(Value::str(ch.to_string()))
+        }
+        (obj, idx) => Err(format!(
+            "cannot index {} with {}",
+            obj.type_name(),
+            idx.type_name()
+        )),
+    }
+}
+
+/// Index write: array[int] and map[string].
+fn index_set(obj: Value, idx: Value, value: Value) -> Result<(), String> {
+    match (obj, idx) {
+        (Value::Array(a), Value::Int(i)) => {
+            let mut items = a.borrow_mut();
+            if i < 0 || i as usize >= items.len() {
+                return Err(format!("index {i} out of bounds for array of length {}", items.len()));
+            }
+            items[i as usize] = value;
+            Ok(())
+        }
+        (Value::Map(m), Value::Str(k)) => {
+            m.borrow_mut().insert(k.to_string(), value);
+            Ok(())
+        }
+        (obj, idx) => Err(format!(
+            "cannot assign into {} with {} index",
+            obj.type_name(),
+            idx.type_name()
+        )),
+    }
+}
+
+/// Build a runtime error with a stack trace. Assumes every frame's `ip`
+/// already points at (or just after) its failing instruction.
+fn rt_error(vm: &Vm, msg: impl Into<String>) -> RscpError {
+    let mut trace = Vec::new();
+    for f in vm.frames.iter().rev() {
+        let (line, _) = f.func.proto.chunk.line_at(f.ip);
+        trace.push(TraceFrame { name: frame_name(&f.func), line });
+    }
+    let line = vm
+        .frames
+        .last()
+        .map_or(0, |f| f.func.proto.chunk.line_at(f.ip).0);
+    RscpError::Runtime { msg: msg.into(), line, trace }
+}
+
+fn frame_name(f: &FunctionVal) -> String {
+    if f.proto.name == "<script>" {
+        "<script>".to_string()
+    } else if f.proto.name.is_empty() {
+        "<anonymous fn>".to_string()
+    } else {
+        format!("fn '{}'", f.proto.name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::compile;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn run(src: &str) -> Result<Vm, RscpError> {
+        let tokens = Lexer::new(src).tokenize()?;
+        let program = Parser::new(tokens).parse()?;
+        let proto = compile(&program)?;
+        let mut vm = Vm::new();
+        vm.quiet = true;
+        vm.run_script(proto)?;
+        Ok(vm)
+    }
+
+    fn global(vm: &Vm, name: &str) -> Value {
+        vm.globals[name].value.clone()
+    }
+
+    #[test]
+    fn arithmetic_and_globals() {
+        let vm = run("var a = 7 / 2; let b = 7.0 / 2; var c = 7 % 3; var d = 2 + 3 * 4;").unwrap();
+        assert!(matches!(global(&vm, "a"), Value::Int(3)));
+        assert!(matches!(global(&vm, "b"), Value::Float(f) if (f - 3.5).abs() < 1e-12));
+        assert!(matches!(global(&vm, "c"), Value::Int(1)));
+        assert!(matches!(global(&vm, "d"), Value::Int(14)));
+    }
+
+    #[test]
+    fn string_concat_and_index() {
+        let vm = run("var s = \"foo\" + \"bar\"; var c = s[0]; var n = len(s);").unwrap();
+        assert!(matches!(global(&vm, "s"), Value::Str(ref s) if &**s == "foobar"));
+        assert!(matches!(global(&vm, "c"), Value::Str(ref c) if &**c == "f"));
+        assert!(matches!(global(&vm, "n"), Value::Int(6)));
+    }
+
+    #[test]
+    fn closures_share_state() {
+        let vm = run(
+            "fn make() { var c = 0; fn inc() { c++; return c; } return inc; }\
+             var a = make(); var b = make(); a(); a(); var x = a(); var y = b();",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "x"), Value::Int(3)));
+        assert!(matches!(global(&vm, "y"), Value::Int(1)));
+    }
+
+    #[test]
+    fn arrays_are_references() {
+        let vm = run(
+            "var a = [1, 2]; var b = a; push(b, 3); var n = len(a); a[0] = 99; var z = b[0];",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "n"), Value::Int(3)));
+        assert!(matches!(global(&vm, "z"), Value::Int(99)));
+    }
+
+    #[test]
+    fn loops_and_break() {
+        let vm = run(
+            "var s = 0;\
+             for (var i = 0; i < 10; i++) { if (i == 5) { break; } s += i; }\
+             var t = 0; for (let v in [10, 20, 30]) { t += v; }",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "s"), Value::Int(10))); // 0+1+2+3+4
+        assert!(matches!(global(&vm, "t"), Value::Int(60)));
+    }
+
+    #[test]
+    fn main_is_autocalled() {
+        let vm = run("var x = 1; fn main() { x = 42; }").unwrap();
+        assert!(matches!(global(&vm, "x"), Value::Int(42)));
+    }
+
+    #[test]
+    fn runtime_errors() {
+        let cases = [
+            ("var x = 1 / 0;", "division by zero"),
+            ("let a = [1]; let x = a[5];", "out of bounds"),
+            ("let m = {}; let x = m[\"k\"];", "missing key"),
+            ("fn f(a, b) { return a; } f(1);", "expects 2 argument"),
+            ("var x = nope;", "undefined variable 'nope'"),
+            ("let x = 1 + true;", "unsupported operand types"),
+            ("var f = 5; f();", "only functions can be called"),
+            ("if (1) { }", "expected a bool"),
+            ("let x = 1; x = 2;", "immutable"),
+            ("fn f() { return g(); } fn g() { return f(); } f();", "stack overflow"),
+        ];
+        for (src, needle) in cases {
+            let err = match run(src) {
+                Err(e) => e,
+                Ok(_) => panic!("expected a runtime error for: {src}"),
+            };
+            let msg = format!("{err}");
+            assert!(msg.contains(needle), "for {src}: got {msg}");
+        }
+    }
+
+    #[test]
+    fn upvalues_close_at_scope_exit() {
+        // Two closures from the same block share one captured local.
+        let vm = run(
+            "var f = null; var g = null;\
+             { var n = 10; f = fn() { n += 1; return n; }; g = fn() { return n; }; }\
+             f(); f(); var x = g();",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "x"), Value::Int(12)));
+    }
+
+    #[test]
+    fn ternary_and_logic() {
+        let vm = run("var a = true ? 1 : 2; var b = false || true; var c = true && false;").unwrap();
+        assert!(matches!(global(&vm, "a"), Value::Int(1)));
+        assert!(matches!(global(&vm, "b"), Value::Bool(true)));
+        assert!(matches!(global(&vm, "c"), Value::Bool(false)));
+    }
+}

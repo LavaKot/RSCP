@@ -1,0 +1,14 @@
+// Rust-style short closures with implicit return.
+let double = |x| x * 2
+let add = |a, b| a + b
+let constant = || 42
+println(double(21), add(1, 2), constant())
+
+let blocky = |x| {
+    var t = x + 1
+    return t * 10
+}
+println(blocky(4))
+
+fn apply(f, v) -> f(v)
+println(apply(|x| x * x, 9))

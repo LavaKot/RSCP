@@ -1,0 +1,19 @@
+// `loop` is the Rust infinite loop; `while` needs no parentheses either.
+var i = 0
+loop {
+    i++
+    if i >= 3 { break }
+}
+println(i)
+
+var j = 10
+while j > 7 { j-- }
+println(j)
+
+var k = 0
+loop {
+    k++
+    if k % 2 == 0 { continue }
+    if k > 6 { break }
+}
+println(k)

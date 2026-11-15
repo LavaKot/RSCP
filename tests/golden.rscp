@@ -1,0 +1,171 @@
+//! Golden test suite: every `tests/cases/*.rscp` is executed through the
+//! built `rscp` binary and compared against its expected output.
+//!
+//! - `foo.rscp` + `foo.out`: the program must exit 0 and print exactly the
+//!   content of `foo.out`.
+//! - `foo.rscp` + `foo.err`: line 1 is the expected exit code, the remaining
+//!   lines must appear as a substring of stderr.
+//!
+//! Programs in `examples/` are smoke-tested (must exit 0).
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_rscp")
+}
+
+fn run_case(path: &Path) -> (i32, String, String) {
+    let out = Command::new(bin())
+        .arg("run")
+        .arg(path)
+        .output()
+        .expect("failed to spawn the rscp binary");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+fn list_rscp_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |x| x == "rscp"))
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn golden_cases() {
+    let cases_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
+    let cases = list_rscp_files(&cases_dir);
+    assert!(
+        cases.len() >= 40,
+        "expected at least 40 golden cases, found {}",
+        cases.len()
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    for case in &cases {
+        let name = case.file_stem().unwrap().to_string_lossy().to_string();
+        let out_path = case.with_extension("out");
+        let err_path = case.with_extension("err");
+        let (code, stdout, stderr) = run_case(case);
+
+        if out_path.exists() {
+            checked += 1;
+            let expected = fs::read_to_string(&out_path).unwrap();
+            if code != 0 {
+                failures.push(format!(
+                    "{name}: expected exit 0, got {code}; stderr:\n{stderr}"
+                ));
+            } else if stdout != expected {
+                failures.push(format!(
+                    "{name}: stdout mismatch\n--- expected ---\n{expected}--- actual ---\n{stdout}"
+                ));
+            }
+        } else if err_path.exists() {
+            checked += 1;
+            let raw = fs::read_to_string(&err_path).unwrap();
+            let mut lines = raw.lines();
+            let want_code: i32 = lines
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("{name}: .err must start with an exit code"));
+            let needle = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+            if code != want_code {
+                failures.push(format!(
+                    "{name}: expected exit {want_code}, got {code}; stderr:\n{stderr}"
+                ));
+            } else if !needle.is_empty() && !stderr.contains(&needle) {
+                failures.push(format!(
+                    "{name}: stderr must contain {needle:?}, got:\n{stderr}"
+                ));
+            }
+        } else {
+            failures.push(format!("{name}: no .out or .err expectation file"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{}/{} golden cases passed; failures:\n{}",
+        checked - failures.len(),
+        checked,
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn examples_run_cleanly() {
+    let examples_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let examples = list_rscp_files(&examples_dir);
+    assert!(
+        examples.len() >= 5,
+        "expected at least 5 examples, found {}",
+        examples.len()
+    );
+    for ex in &examples {
+        let (code, stdout, stderr) = run_case(ex);
+        assert_eq!(
+            code, 0,
+            "{} failed (exit {code}):\nstdout:\n{stdout}stderr:\n{stderr}",
+            ex.display()
+        );
+        assert!(
+            !stdout.trim().is_empty(),
+            "{} produced no output",
+            ex.display()
+        );
+    }
+}
+
+#[test]
+fn cli_surface() {
+    // version
+    let out = Command::new(bin()).arg("version").output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("rscp 2026.2.0.0"));
+
+    // help
+    let out = Command::new(bin()).arg("help").output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("USAGE"));
+
+    // no args -> usage on stderr, exit 64
+    let out = Command::new(bin()).output().unwrap();
+    assert_eq!(out.status.code(), Some(64));
+
+    // unknown command -> exit 64
+    let out = Command::new(bin()).arg("definitely-not-a-command").output().unwrap();
+    assert_eq!(out.status.code(), Some(64));
+
+    // missing file -> exit 66
+    let out = Command::new(bin())
+        .arg("run")
+        .arg("no/such/file.rscp")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(66));
+
+    // tokens / ast / disasm on a tiny program
+    let tmp = std::env::temp_dir().join("rscp_cli_test.rscp");
+    fs::write(&tmp, "fn add(a, b) { return a + b; }\nprintln(add(1, 2));\n").unwrap();
+    for cmd in ["tokens", "ast", "disasm"] {
+        let out = Command::new(bin()).arg(cmd).arg(&tmp).output().unwrap();
+        assert!(
+            out.status.success() && !out.stdout.is_empty(),
+            "{cmd} produced no output"
+        );
+    }
+    let _ = fs::remove_file(&tmp);
+}

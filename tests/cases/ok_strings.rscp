@@ -1,0 +1,9 @@
+let s = "Hello" + ", " + "world";
+println(s);
+println(len(s));
+println(s[0], s[6]);
+let esc = "line1\nline2\ttab\\done \"quoted\"";
+println(esc);
+println("abc" < "abd", "a" == "a", "b" != "c");
+println(str(42) + "!");
+println("héllo"[1]);

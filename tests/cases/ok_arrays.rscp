@@ -1,0 +1,18 @@
+let a = [1, 2, 3];
+println(a);
+println(a[0], a[2], len(a));
+a[1] = 20;
+println(a);
+push(a, 4);
+println(a, len(a));
+println(pop(a), a);
+let nested = [[1, 2], [3, 4], ["x", "y"]];
+println(nested[1][0], nested[2][1]);
+println(nested);
+var shared = [0];
+let alias = shared;
+push(alias, 1);
+println(shared);
+println([1] + [2, 3]);
+let mixed = [1, 2.5, true, null, "s", [1]];
+println(mixed);

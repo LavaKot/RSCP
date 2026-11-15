@@ -1,0 +1,161 @@
+//! Abstract syntax tree for RSCP.
+//!
+//! Every node carries the (line, col) of its first token so that the
+//! compiler can report precise errors.
+
+/// Unary operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Not, // !
+    Neg, // unary -
+}
+
+/// Binary operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// Logical operators (short-circuiting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalOp {
+    And, // &&
+    Or,  // ||
+}
+
+/// Assignment operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignOp {
+    Set,      // =
+    AddSet,   // +=
+    SubSet,   // -=
+    MulSet,   // *=
+    DivSet,   // /=
+    ModSet,   // %=
+}
+
+impl AssignOp {
+    /// The arithmetic operator for compound assignment, if any.
+    pub fn binary(self) -> Option<BinaryOp> {
+        match self {
+            AssignOp::Set => None,
+            AssignOp::AddSet => Some(BinaryOp::Add),
+            AssignOp::SubSet => Some(BinaryOp::Sub),
+            AssignOp::MulSet => Some(BinaryOp::Mul),
+            AssignOp::DivSet => Some(BinaryOp::Div),
+            AssignOp::ModSet => Some(BinaryOp::Mod),
+        }
+    }
+}
+
+/// A function literal: parameter list plus body statements.
+/// Used both for named `fn` declarations and anonymous `fn` expressions.
+#[derive(Debug, Clone)]
+pub struct FuncLit {
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// Assignment target (lvalue).
+#[derive(Debug, Clone)]
+pub enum Target {
+    Ident { name: String, line: usize, col: usize },
+    Index { obj: Expr, idx: Expr },
+}
+
+/// An expression node.
+#[derive(Debug, Clone)]
+pub struct Expr {
+    pub line: usize,
+    pub col: usize,
+    pub kind: ExprKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExprKind {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    Null,
+    Ident(String),
+    Unary { op: UnaryOp, expr: Box<Expr> },
+    Binary { op: BinaryOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    Logical { op: LogicalOp, lhs: Box<Expr>, rhs: Box<Expr> },
+    Ternary { cond: Box<Expr>, then: Box<Expr>, els: Box<Expr> },
+    Call { callee: Box<Expr>, args: Vec<Expr> },
+    Index { obj: Box<Expr>, idx: Box<Expr> },
+    /// `start..end` (exclusive) or `start..=end` (inclusive).
+    /// Only valid as the iterable of a `for` loop.
+    Range { start: Box<Expr>, end: Box<Expr>, inclusive: bool },
+    Array(Vec<Expr>),
+    Map(Vec<(Expr, Expr)>),
+    Func(Box<FuncLit>),
+}
+
+impl Expr {
+    pub fn new(kind: ExprKind, line: usize, col: usize) -> Self {
+        Expr { line, col, kind }
+    }
+}
+
+/// A statement node.
+#[derive(Debug, Clone)]
+pub struct Stmt {
+    pub line: usize,
+    pub col: usize,
+    pub kind: StmtKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum StmtKind {
+    /// `let x = e;` (immutable binding) or `var x = e;` (mutable binding).
+    Let { name: String, mutable: bool, init: Expr },
+    /// `x = e;`, `x += e;`, `a[i] = e;`, ...
+    Assign { target: Target, op: AssignOp, value: Expr },
+    /// `x++;` / `x--;` / `a[i]++;`
+    IncDec { target: Target, plus: bool },
+    /// Expression used as a statement; its value is discarded.
+    Expr(Expr),
+    Block(Vec<Stmt>),
+    If { cond: Expr, then: Box<Stmt>, els: Option<Box<Stmt>> },
+    While { cond: Expr, body: Box<Stmt> },
+    /// C-style `for (init; cond; step) body` (parentheses required).
+    ForC {
+        init: Option<Box<Stmt>>,
+        cond: Option<Expr>,
+        step: Option<Box<Stmt>>,
+        body: Box<Stmt>,
+    },
+    /// `for (let x in arr) body` or the Rust-style `for x in arr body`
+    /// (the loop variable is a fresh binding each iteration).
+    ForIn {
+        mutable: bool,
+        name: String,
+        iter: Expr,
+        body: Box<Stmt>,
+    },
+    /// Named function declaration: `fn name(p1, p2) { ... }`.
+    Fn { name: String, func: FuncLit },
+    Return(Option<Expr>),
+    Break,
+    Continue,
+}
+
+impl Stmt {
+    pub fn new(kind: StmtKind, line: usize, col: usize) -> Self {
+        Stmt { line, col, kind }
+    }
+}

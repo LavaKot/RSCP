@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Run tests
+        run: cargo test
+      - name: Smoke-test the examples
+        shell: bash
+        run: |
+          bin=target/release/rscp
+          [[ "${{ matrix.os }}" == windows-latest ]] && bin=target/release/rscp.exe
+          for f in examples/*.rscp; do
+            echo "== $f"
+            "$bin" run "$f" > /dev/null
+          done

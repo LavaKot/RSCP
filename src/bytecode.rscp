@@ -1,0 +1,419 @@
+//! Bytecode representation: opcodes, chunks, function prototypes and the
+//! disassembler behind `rscp disasm`.
+
+use crate::value::Value;
+
+/// Every VM instruction. Operands are little-endian; sizes per opcode are
+/// declared by [`Op::operand`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Op {
+    /// push consts[u16]
+    Constant = 0,
+    Null,
+    True,
+    False,
+    /// pop 1 (closes any upvalues pointing at the popped slot)
+    Pop,
+    /// pop n (u8)
+    PopN,
+    /// push stack[base + u8]
+    GetLocal,
+    /// stack[base + u8] = pop
+    SetLocal,
+    /// push upvalue[u8]
+    GetUpvalue,
+    /// upvalue[u8] = pop
+    SetUpvalue,
+    /// globals[consts[u16]] = pop (binding is mutable)
+    DefineGlobal,
+    /// globals[consts[u16]] = pop (binding is immutable)
+    DefineGlobalConst,
+    /// push globals[consts[u16]]
+    GetGlobal,
+    /// globals[consts[u16]] = pop
+    SetGlobal,
+    Equal,
+    Greater,
+    Less,
+    Le,
+    Ge,
+    Not,
+    Negate,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    /// absolute jump to u16
+    Jump,
+    /// peek top; jump to u16 if it is `false` (errors on non-bool)
+    JumpIfFalsePeek,
+    /// peek top; jump to u16 if it is `true` (errors on non-bool)
+    JumpIfTruePeek,
+    /// absolute backward jump to u16
+    Loop,
+    /// call: callee + argc(u8) args are on the stack
+    Call,
+    /// create a closure from prototype consts[u16]; followed by one
+    /// (is_local: u8, index: u8) pair per prototype upvalue
+    Closure,
+    Return,
+    /// build an array of u16 elements popped off the stack
+    Array,
+    /// build a map of u16 key/value pairs popped off the stack
+    Map,
+    /// obj[idx] (pop idx, obj; push result)
+    IndexGet,
+    /// obj[idx] = value (pop value, idx, obj)
+    IndexSet,
+    /// like IndexGet but keeps obj and idx on the stack (compound assignment)
+    IndexGetKeep,
+    /// len(array) — used by `for-in`
+    ArrayLen,
+}
+
+const ALL_OPS: [Op; 39] = [
+    Op::Constant,
+    Op::Null,
+    Op::True,
+    Op::False,
+    Op::Pop,
+    Op::PopN,
+    Op::GetLocal,
+    Op::SetLocal,
+    Op::GetUpvalue,
+    Op::SetUpvalue,
+    Op::DefineGlobal,
+    Op::DefineGlobalConst,
+    Op::GetGlobal,
+    Op::SetGlobal,
+    Op::Equal,
+    Op::Greater,
+    Op::Less,
+    Op::Le,
+    Op::Ge,
+    Op::Not,
+    Op::Negate,
+    Op::Add,
+    Op::Sub,
+    Op::Mul,
+    Op::Div,
+    Op::Mod,
+    Op::Jump,
+    Op::JumpIfFalsePeek,
+    Op::JumpIfTruePeek,
+    Op::Loop,
+    Op::Call,
+    Op::Closure,
+    Op::Return,
+    Op::Array,
+    Op::Map,
+    Op::IndexGet,
+    Op::IndexSet,
+    Op::IndexGetKeep,
+    Op::ArrayLen,
+];
+
+impl Op {
+    pub fn from_byte(b: u8) -> Option<Op> {
+        ALL_OPS.get(b as usize).copied()
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Op::Constant => "Constant",
+            Op::Null => "Null",
+            Op::True => "True",
+            Op::False => "False",
+            Op::Pop => "Pop",
+            Op::PopN => "PopN",
+            Op::GetLocal => "GetLocal",
+            Op::SetLocal => "SetLocal",
+            Op::GetUpvalue => "GetUpvalue",
+            Op::SetUpvalue => "SetUpvalue",
+            Op::DefineGlobal => "DefineGlobal",
+            Op::DefineGlobalConst => "DefineGlobalConst",
+            Op::GetGlobal => "GetGlobal",
+            Op::SetGlobal => "SetGlobal",
+            Op::Equal => "Equal",
+            Op::Greater => "Greater",
+            Op::Less => "Less",
+            Op::Le => "Le",
+            Op::Ge => "Ge",
+            Op::Not => "Not",
+            Op::Negate => "Negate",
+            Op::Add => "Add",
+            Op::Sub => "Sub",
+            Op::Mul => "Mul",
+            Op::Div => "Div",
+            Op::Mod => "Mod",
+            Op::Jump => "Jump",
+            Op::JumpIfFalsePeek => "JumpIfFalsePeek",
+            Op::JumpIfTruePeek => "JumpIfTruePeek",
+            Op::Loop => "Loop",
+            Op::Call => "Call",
+            Op::Closure => "Closure",
+            Op::Return => "Return",
+            Op::Array => "Array",
+            Op::Map => "Map",
+            Op::IndexGet => "IndexGet",
+            Op::IndexSet => "IndexSet",
+            Op::IndexGetKeep => "IndexGetKeep",
+            Op::ArrayLen => "ArrayLen",
+        }
+    }
+
+    /// The kind (and size) of this opcode's inline operands.
+    pub fn operand(self) -> Operand {
+        match self {
+            Op::PopN
+            | Op::GetLocal
+            | Op::SetLocal
+            | Op::GetUpvalue
+            | Op::SetUpvalue
+            | Op::Call => Operand::U8,
+            Op::Constant
+            | Op::DefineGlobal
+            | Op::DefineGlobalConst
+            | Op::GetGlobal
+            | Op::SetGlobal
+            | Op::Jump
+            | Op::JumpIfFalsePeek
+            | Op::JumpIfTruePeek
+            | Op::Loop
+            | Op::Closure
+            | Op::Array
+            | Op::Map => Operand::U16,
+            _ => Operand::None,
+        }
+    }
+}
+
+/// Operand layout of an opcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operand {
+    None,
+    U8,
+    U16,
+}
+
+
+/// A compiled function: its bytecode, constants, arity and upvalue captures.
+pub struct FnProto {
+    /// Empty for anonymous functions, "<script>" for the top level.
+    pub name: String,
+    pub arity: u8,
+    /// (is_local, index): capture the local at frame_base+index of the
+    /// enclosing function, or the enclosing closure's upvalue #index.
+    pub upvalues: Vec<(bool, u8)>,
+    pub chunk: Chunk,
+}
+
+impl std::fmt::Debug for FnProto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FnProto")
+            .field("name", &self.name)
+            .field("arity", &self.arity)
+            .field("upvalues", &self.upvalues)
+            .field("code_len", &self.chunk.code.len())
+            .finish()
+    }
+}
+
+/// A bytecode chunk: code, constant pool and per-byte source positions.
+pub struct Chunk {
+    pub code: Vec<u8>,
+    pub consts: Vec<Value>,
+    pub lines: Vec<u32>,
+    pub cols: Vec<u32>,
+}
+
+impl Default for Chunk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Chunk {
+    pub fn new() -> Self {
+        Chunk { code: Vec::new(), consts: Vec::new(), lines: Vec::new(), cols: Vec::new() }
+    }
+
+    fn at(&mut self, line: usize, col: usize) {
+        self.lines.push(line as u32);
+        self.cols.push(col as u32);
+    }
+
+    /// Emit a bare opcode; returns the index of the opcode byte.
+    pub fn emit(&mut self, op: Op, line: usize, col: usize) -> usize {
+        let i = self.code.len();
+        self.code.push(op as u8);
+        self.at(line, col);
+        i
+    }
+
+    /// Emit an opcode with a u8 operand.
+    pub fn emit_op_u8(&mut self, op: Op, v: u8, line: usize, col: usize) -> usize {
+        let i = self.emit(op, line, col);
+        self.code.push(v);
+        self.at(line, col);
+        i
+    }
+
+    /// Emit an opcode with a u16 (little-endian) operand.
+    pub fn emit_op_u16(&mut self, op: Op, v: u16, line: usize, col: usize) -> usize {
+        let i = self.emit(op, line, col);
+        self.code.push((v & 0xff) as u8);
+        self.code.push((v >> 8) as u8);
+        self.at(line, col);
+        self.at(line, col);
+        i
+    }
+
+    /// Overwrite the u16 operand stored at `at` (the opcode index).
+    pub fn patch_u16(&mut self, at: usize, target: usize) {
+        let t = target as u16;
+        self.code[at + 1] = (t & 0xff) as u8;
+        self.code[at + 2] = (t >> 8) as u8;
+    }
+
+    /// Append an extra raw u8 operand (used by Closure descriptors).
+    pub fn push_byte(&mut self, b: u8, line: usize, col: usize) {
+        self.code.push(b);
+        self.at(line, col);
+    }
+
+    /// (line, col) of the instruction byte at `ip`.
+    pub fn line_at(&self, ip: usize) -> (usize, usize) {
+        if ip >= self.lines.len() {
+            return (0, 0);
+        }
+        (self.lines[ip] as usize, self.cols[ip] as usize)
+    }
+}
+
+/// Disassemble a whole prototype tree (the script and every nested function).
+pub fn disassemble_proto(proto: &FnProto) -> String {
+    let mut out = String::new();
+    disasm_one(proto, &mut out);
+    out
+}
+
+fn disasm_one(p: &FnProto, out: &mut String) {
+    let title = if p.name.is_empty() {
+        "<anonymous>".to_string()
+    } else {
+        p.name.clone()
+    };
+    out.push_str(&format!(
+        "== {} ({} params, {} upvalues) ==\n",
+        title,
+        p.arity,
+        p.upvalues.len()
+    ));
+    if !p.chunk.consts.is_empty() {
+        out.push_str("constants:\n");
+        for (i, c) in p.chunk.consts.iter().enumerate() {
+            out.push_str(&format!("  {i:04} = {}\n", const_repr(c)));
+        }
+    }
+    out.push_str("code:\n");
+
+    let chunk = &p.chunk;
+    let mut ip = 0usize;
+    while ip < chunk.code.len() {
+        let op_ip = ip;
+        let byte = chunk.code[ip];
+        ip += 1;
+        let op = match Op::from_byte(byte) {
+            Some(op) => op,
+            None => {
+                out.push_str(&format!("  {op_ip:04}  <bad opcode {byte}>\n"));
+                continue;
+            }
+        };
+        let (line, col) = chunk.line_at(op_ip);
+        let mut text = format!("  {op_ip:04}  L{line}:C{col:<4} {}", op.name());
+        let mut u16_operand: Option<u16> = None;
+        match op.operand() {
+            Operand::None => {}
+            Operand::U8 => {
+                let v = chunk.code[ip];
+                ip += 1;
+                text.push_str(&format!(" {v}"));
+            }
+            Operand::U16 => {
+                let v = u16::from(chunk.code[ip]) | (u16::from(chunk.code[ip + 1]) << 8);
+                ip += 2;
+                u16_operand = Some(v);
+                text.push_str(&format!(" {v}"));
+                match op {
+                    Op::Constant => {
+                        text.push_str(&format!(
+                            "        ; {}",
+                            const_repr(&chunk.consts[v as usize])
+                        ));
+                    }
+                    Op::DefineGlobal | Op::DefineGlobalConst | Op::GetGlobal | Op::SetGlobal => {
+                        text.push_str(&format!(
+                            "        ; '{}'",
+                            const_repr(&chunk.consts[v as usize])
+                        ));
+                    }
+                    Op::Jump | Op::JumpIfFalsePeek | Op::JumpIfTruePeek | Op::Loop => {
+                        text.push_str(&format!("        ; -> {v}"));
+                    }
+                    Op::Closure => {
+                        if let Value::Proto(inner) = &chunk.consts[v as usize] {
+                            text.push_str(&format!(
+                                "        ; fn '{}' ({} params)",
+                                if inner.name.is_empty() { "<anonymous>" } else { &inner.name },
+                                inner.arity
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if op == Op::Closure {
+            let ci = u16_operand.unwrap() as usize;
+            let n = match &chunk.consts[ci] {
+                Value::Proto(inner) => inner.upvalues.len(),
+                _ => 0,
+            };
+            for _ in 0..n {
+                let is_local = chunk.code[ip];
+                let idx = chunk.code[ip + 1];
+                ip += 2;
+                text.push_str(&format!(
+                    "\n           capture {} {}",
+                    if is_local == 1 { "local" } else { "upvalue" },
+                    idx
+                ));
+            }
+        }
+        out.push_str(&text);
+        out.push('\n');
+    }
+
+    for c in &p.chunk.consts {
+        if let Value::Proto(inner) = c {
+            out.push('\n');
+            disasm_one(inner, out);
+        }
+    }
+}
+
+fn const_repr(v: &Value) -> String {
+    match v {
+        Value::Int(i) => format!("Int({i})"),
+        Value::Float(f) => format!("Float({f:?})"),
+        Value::Str(s) => format!("Str({s:?})"),
+        Value::Proto(p) => {
+            format!("Fn('{}')", if p.name.is_empty() { "<anonymous>" } else { &p.name })
+        }
+        other => format!("{}", other.type_name()),
+    }
+}

@@ -1,0 +1,29 @@
+// Closures capture their environment by reference: each counter owns its
+// own `count`, even after `counter` has returned.
+fn counter(label) {
+    var count = 0
+    return fn() {
+        count++
+        return label + ": " + str(count)
+    }
+}
+
+let apples = counter("apples")
+let pears = counter("pears")
+println(apples())
+println(apples())
+println(pears())
+println(apples())
+
+// Short closures compose nicely (Rust-style |params| body).
+fn applyTwice(f, x) -> f(f(x))
+println(applyTwice(|n| n * 3, 7))        // 63
+let addThenDouble = |a, b| (a + b) * 2
+println(addThenDouble(3, 4))             // 14
+
+// A block-bodied closure needs an explicit `return`.
+let withBlock = |x| {
+    var t = x + 1
+    return t * 10
+}
+println(withBlock(4))                    // 50

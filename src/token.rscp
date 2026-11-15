@@ -1,0 +1,177 @@
+//! Token definitions for the RSCP language.
+
+/// Literal values attached to tokens by the lexer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lit {
+    Int(i64),
+    Float(f64),
+    Str(String),
+}
+
+/// Every lexical token type in RSCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenType {
+    // Literals and identifiers
+    Int,
+    Float,
+    Str,
+    Ident,
+    // Keywords
+    Fn,
+    Let,
+    Var,
+    True,
+    False,
+    Null,
+    If,
+    Else,
+    While,
+    Loop,
+    For,
+    In,
+    Return,
+    Break,
+    Continue,
+    // Delimiters
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Comma,
+    Semicolon,
+    Colon,
+    Question,
+    Arrow,
+    DotDot,
+    DotDotEq,
+    Pipe,
+    // Assignment operators
+    Assign,
+    PlusAssign,
+    MinusAssign,
+    StarAssign,
+    SlashAssign,
+    PercentAssign,
+    // Arithmetic operators
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    PlusPlus,
+    MinusMinus,
+    // Comparison operators
+    EqEq,
+    NotEq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    // Logical operators
+    AndAnd,
+    OrOr,
+    Not,
+    // End of input
+    Eof,
+}
+
+impl TokenType {
+    /// Human-readable name used in parser error messages.
+    pub fn describe(self) -> String {
+        use TokenType::*;
+        let s = match self {
+            Int => "an integer literal",
+            Float => "a float literal",
+            Str => "a string literal",
+            Ident => "an identifier",
+            Fn => "'fn'",
+            Let => "'let'",
+            Var => "'var'",
+            True => "'true'",
+            False => "'false'",
+            Null => "'null'",
+            If => "'if'",
+            Else => "'else'",
+            While => "'while'",
+            Loop => "'loop'",
+            For => "'for'",
+            In => "'in'",
+            Return => "'return'",
+            Break => "'break'",
+            Continue => "'continue'",
+            LParen => "'('",
+            RParen => "')'",
+            LBrace => "'{'",
+            RBrace => "'}'",
+            LBracket => "'['",
+            RBracket => "']'",
+            Comma => "','",
+            Semicolon => "';'",
+            Colon => "':'",
+            Question => "'?'",
+            Arrow => "'->'",
+            DotDot => "'..'",
+            DotDotEq => "'..='",
+            Pipe => "'|'",
+            Assign => "'='",
+            PlusAssign => "'+='",
+            MinusAssign => "'-='",
+            StarAssign => "'*='",
+            SlashAssign => "'/='",
+            PercentAssign => "'%='",
+            Plus => "'+'",
+            Minus => "'-'",
+            Star => "'*'",
+            Slash => "'/'",
+            Percent => "'%'",
+            PlusPlus => "'++'",
+            MinusMinus => "'--'",
+            EqEq => "'=='",
+            NotEq => "'!='",
+            Lt => "'<'",
+            Le => "'<='",
+            Gt => "'>'",
+            Ge => "'>='",
+            AndAnd => "'&&'",
+            OrOr => "'||'",
+            Not => "'!'",
+            Eof => "end of input",
+        };
+        s.to_string()
+    }
+}
+
+/// A single token with its source position (1-based line and column).
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub ty: TokenType,
+    pub lexeme: String,
+    pub lit: Option<Lit>,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// Map an identifier to a keyword token type, if it is one.
+pub fn keyword(ident: &str) -> Option<TokenType> {
+    use TokenType::*;
+    Some(match ident {
+        "fn" => Fn,
+        "let" => Let,
+        "var" => Var,
+        "true" => True,
+        "false" => False,
+        "null" => Null,
+        "if" => If,
+        "else" => Else,
+        "while" => While,
+        "loop" => Loop,
+        "for" => For,
+        "in" => In,
+        "return" => Return,
+        "break" => Break,
+        "continue" => Continue,
+        _ => return None,
+    })
+}

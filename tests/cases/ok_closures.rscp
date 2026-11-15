@@ -1,0 +1,35 @@
+fn makeCounter() {
+    var count = 0;
+    fn inc() { count++; return count; }
+    return inc;
+}
+var c1 = makeCounter();
+var c2 = makeCounter();
+c1(); c1();
+println(c1(), c2());
+
+fn makeAdder(n) { return fn(x) { return x + n; }; }
+let add5 = makeAdder(5);
+let add10 = makeAdder(10);
+println(add5(1), add10(1));
+
+fn makePair() {
+    var v = 0;
+    var get = fn() { return v; };
+    var set = fn(x) { v = x; };
+    return [get, set];
+}
+var pair = makePair();
+pair[1](42);
+println(pair[0]());
+
+fn level1() {
+    var a = 1;
+    fn level2() {
+        var b = 2;
+        fn level3() { return a + b; }
+        return level3();
+    }
+    return level2();
+}
+println(level1());

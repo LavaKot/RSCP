@@ -1,0 +1,302 @@
+//! Built-in functions implemented in Rust.
+//!
+//! Every native is registered as an immutable global, so user code can
+//! shadow a builtin with its own top-level declaration (the compiler's
+//! duplicate check fires first in file mode — so shadowing happens only in
+//! the REPL, where redefinition is allowed).
+
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::value::Value;
+use crate::vm::Vm;
+
+pub fn install(vm: &mut Vm) {
+    vm.define_native("print", n_print);
+    vm.define_native("println", n_println);
+    vm.define_native("len", n_len);
+    vm.define_native("str", n_str);
+    vm.define_native("int", n_int);
+    vm.define_native("float", n_float);
+    vm.define_native("type", n_type);
+    vm.define_native("abs", n_abs);
+    vm.define_native("min", n_min);
+    vm.define_native("max", n_max);
+    vm.define_native("sqrt", n_sqrt);
+    vm.define_native("pow", n_pow);
+    vm.define_native("rand", n_rand);
+    vm.define_native("clock", n_clock);
+    vm.define_native("push", n_push);
+    vm.define_native("pop", n_pop);
+    vm.define_native("keys", n_keys);
+    vm.define_native("has", n_has);
+    vm.define_native("assert", n_assert);
+}
+
+fn join_display(args: &[Value]) -> String {
+    args.iter()
+        .map(|v| v.display_string(0))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn n_print(vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if !vm.quiet {
+        print!("{}", join_display(&args));
+    }
+    Ok(Value::Null)
+}
+
+fn n_println(vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if !vm.quiet {
+        println!("{}", join_display(&args));
+    }
+    Ok(Value::Null)
+}
+
+fn n_len(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("len", &args)?;
+    let n = match v {
+        Value::Str(s) => s.chars().count() as i64,
+        Value::Array(a) => a.borrow().len() as i64,
+        Value::Map(m) => m.borrow().len() as i64,
+        other => {
+            return Err(format!(
+                "len: expected a string, array or map, got {}",
+                other.type_name()
+            ))
+        }
+    };
+    Ok(Value::Int(n))
+}
+
+fn n_str(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("str", &args)?;
+    Ok(Value::str(v.display_string(0)))
+}
+
+fn n_int(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("int", &args)?;
+    match v {
+        Value::Int(i) => Ok(Value::Int(i)),
+        Value::Float(f) => {
+            if f.is_nan() || f.is_infinite() || f >= 9.223372036854776e18 || f < -9.223372036854776e18 {
+                Err(format!("int: value {f:?} is out of range"))
+            } else {
+                Ok(Value::Int(f.trunc() as i64))
+            }
+        }
+        Value::Str(s) => s
+            .trim()
+            .parse::<i64>()
+            .map(Value::Int)
+            .map_err(|_| format!("int: cannot convert '{s}' to an integer")),
+        other => Err(format!(
+            "int: expected a number or a numeric string, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn n_float(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("float", &args)?;
+    match v {
+        Value::Int(i) => Ok(Value::Float(i as f64)),
+        Value::Float(f) => Ok(Value::Float(f)),
+        Value::Str(s) => s
+            .trim()
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| format!("float: cannot convert '{s}' to a float")),
+        other => Err(format!(
+            "float: expected a number or a numeric string, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn n_type(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("type", &args)?;
+    Ok(Value::str(v.type_name()))
+}
+
+fn n_abs(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("abs", &args)?;
+    match v {
+        Value::Int(i) => i
+            .checked_abs()
+            .map(Value::Int)
+            .ok_or_else(|| "abs: integer overflow".to_string()),
+        Value::Float(f) => Ok(Value::Float(f.abs())),
+        other => Err(format!(
+            "abs: expected a number, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn two_numbers(name: &str, args: &[Value]) -> Result<(Value, Value), String> {
+    if args.len() != 2 {
+        return Err(format!("{name}: expected 2 arguments, got {}", args.len()));
+    }
+    for a in &args[..2] {
+        if !matches!(a, Value::Int(_) | Value::Float(_)) {
+            return Err(format!(
+                "{name}: expected numbers, got {}",
+                a.type_name()
+            ));
+        }
+    }
+    Ok((args[0].clone(), args[1].clone()))
+}
+
+fn n_min(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let (a, b) = two_numbers("min", &args)?;
+    match Value::num_cmp(&a, &b) {
+        Some(std::cmp::Ordering::Greater) => Ok(b),
+        _ => Ok(a),
+    }
+}
+
+fn n_max(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let (a, b) = two_numbers("max", &args)?;
+    match Value::num_cmp(&a, &b) {
+        Some(std::cmp::Ordering::Less) => Ok(b),
+        _ => Ok(a),
+    }
+}
+
+fn n_sqrt(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("sqrt", &args)?;
+    match v {
+        Value::Int(i) => Ok(Value::Float((i as f64).sqrt())),
+        Value::Float(f) => Ok(Value::Float(f.sqrt())),
+        other => Err(format!(
+            "sqrt: expected a number, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn n_pow(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let (a, b) = two_numbers("pow", &args)?;
+    let x = match a {
+        Value::Int(i) => i as f64,
+        Value::Float(f) => f,
+        _ => unreachable!(),
+    };
+    let y = match b {
+        Value::Int(i) => i as f64,
+        Value::Float(f) => f,
+        _ => unreachable!(),
+    };
+    Ok(Value::Float(x.powf(y)))
+}
+
+fn n_rand(vm: &mut Vm, _args: Vec<Value>) -> Result<Value, String> {
+    Ok(Value::Float(vm.next_rand()))
+}
+
+fn n_clock(_vm: &mut Vm, _args: Vec<Value>) -> Result<Value, String> {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    Ok(Value::Float(secs))
+}
+
+fn n_push(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err(format!("push: expected 2 arguments (array, value), got {}", args.len()));
+    }
+    match &args[0] {
+        Value::Array(a) => {
+            a.borrow_mut().push(args[1].clone());
+            Ok(Value::Null)
+        }
+        other => Err(format!(
+            "push: expected an array, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn n_pop(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("pop", &args)?;
+    match v {
+        Value::Array(a) => match a.borrow_mut().pop() {
+            Some(v) => Ok(v),
+            None => Err("pop: array is empty".to_string()),
+        },
+        other => Err(format!(
+            "pop: expected an array, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn n_keys(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("keys", &args)?;
+    match v {
+        Value::Map(m) => {
+            let mut ks: Vec<String> = m.borrow().keys().cloned().collect();
+            ks.sort();
+            let items: Vec<Value> = ks.into_iter().map(Value::str).collect();
+            Ok(Value::Array(Rc::new(RefCell::new(items))))
+        }
+        other => Err(format!(
+            "keys: expected a map, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn n_has(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err(format!("has: expected 2 arguments (map, key), got {}", args.len()));
+    }
+    match (&args[0], &args[1]) {
+        (Value::Map(m), Value::Str(k)) => Ok(Value::Bool(m.borrow().contains_key(&**k))),
+        (Value::Map(_), other) => Err(format!(
+            "has: the key must be a string, got {}",
+            other.type_name()
+        )),
+        (other, _) => Err(format!(
+            "has: expected a map, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn n_assert(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(format!(
+            "assert: expected 1 or 2 arguments, got {}",
+            args.len()
+        ));
+    }
+    match &args[0] {
+        Value::Bool(true) => Ok(Value::Null),
+        Value::Bool(false) => {
+            if args.len() == 2 {
+                Err(format!("assertion failed: {}", args[1].display_string(0)))
+            } else {
+                Err("assertion failed".to_string())
+            }
+        }
+        other => Err(format!(
+            "assert: expected a bool, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn one_arg(name: &str, args: &[Value]) -> Result<Value, String> {
+    if args.len() != 1 {
+        Err(format!("{name}: expected 1 argument, got {}", args.len()))
+    } else {
+        Ok(args[0].clone())
+    }
+}
+

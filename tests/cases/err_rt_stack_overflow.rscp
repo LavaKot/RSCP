@@ -1,0 +1,2 @@
+fn boom() { return boom(); }
+boom();

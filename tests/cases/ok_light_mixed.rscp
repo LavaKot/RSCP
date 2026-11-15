@@ -1,0 +1,12 @@
+// Old and new syntax mix freely in one file.
+let old = 1;
+var neo = 2
+if (old < neo) { println("old-school") }
+if old < neo { println("light") }
+for (var i = 0; i < 2; i++) { print(i, "c;") }
+println()
+for i in 0..2 { print(i, "r;") }
+println()
+let f = fn(x) { return x + 1; };
+let g = |x| x + 1
+println(f(1), g(1))

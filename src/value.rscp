@@ -1,0 +1,210 @@
+//! Runtime values.
+//!
+//! Ints are `i64`, floats are `f64`, strings are UTF-8 (`Rc<str>`).
+//! Arrays and maps are reference types (`Rc<RefCell<...>>`): assignment
+//! shares the same object, and `==` compares references for them while
+//! numbers/strings/bools/null compare by value.
+
+use std::cell::RefCell;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use crate::bytecode::FnProto;
+use crate::vm::Vm;
+
+/// A native (Rust-implemented) function.
+pub type NativeFn = fn(&mut Vm, Vec<Value>) -> Result<Value, String>;
+
+/// A compiled function plus its captured upvalues.
+pub struct FunctionVal {
+    pub proto: Rc<FnProto>,
+    pub upvalues: Vec<Rc<RefCell<Upvalue>>>,
+}
+
+/// A built-in function implemented in Rust.
+pub struct NativeVal {
+    pub name: &'static str,
+    pub func: NativeFn,
+}
+
+/// An upvalue cell: either still pointing at a live stack slot, or holding
+/// the closed value after the defining scope returned.
+pub enum Upvalue {
+    Open(usize),
+    Closed(Value),
+}
+
+/// A runtime value.
+#[derive(Clone)]
+pub enum Value {
+    Null,
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(Rc<str>),
+    Array(Rc<RefCell<Vec<Value>>>),
+    Map(Rc<RefCell<HashMap<String, Value>>>),
+    Func(Rc<FunctionVal>),
+    Native(Rc<NativeVal>),
+    /// Compile-time only: a function prototype stored in a constant pool.
+    Proto(Rc<FnProto>),
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.display_string(0))
+    }
+}
+
+impl Value {
+    pub fn str(s: impl AsRef<str>) -> Value {
+        Value::Str(Rc::from(s.as_ref()))
+    }
+
+    /// Type name as reported by `type()` and error messages.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::Bool(_) => "bool",
+            Value::Str(_) => "string",
+            Value::Array(_) => "array",
+            Value::Map(_) => "map",
+            Value::Func(_) | Value::Proto(_) => "function",
+            Value::Native(_) => "function",
+        }
+    }
+
+    /// Human-readable form used by `print`, `println` and `str`.
+    /// Strings print unquoted at the top level and quoted inside containers.
+    pub fn display_string(&self, depth: usize) -> String {
+        if depth > 16 {
+            return "…".to_string();
+        }
+        match self {
+            Value::Null => "null".to_string(),
+            Value::Int(i) => i.to_string(),
+            // Rust's Debug formatting for f64 is the shortest representation
+            // that round-trips, and keeps a trailing ".0" for whole floats.
+            Value::Float(f) => format!("{f:?}"),
+            Value::Bool(b) => b.to_string(),
+            Value::Str(s) => s.to_string(),
+            Value::Array(items) => {
+                let mut parts: Vec<String> = items
+                    .borrow()
+                    .iter()
+                    .map(|v| v.nested_string(depth + 1))
+                    .collect();
+                // Guard against self-referential containers (`push(a, a)`).
+                if parts.len() > 100 {
+                    parts.truncate(100);
+                    parts.push("…".to_string());
+                }
+                format!("[{}]", parts.join(", "))
+            }
+            Value::Map(m) => {
+                let borrowed = m.borrow();
+                let mut keys: Vec<&String> = borrowed.keys().collect();
+                keys.sort();
+                let parts: Vec<String> = keys
+                    .iter()
+                    .map(|k| format!("{:?}: {}", k, borrowed[*k].nested_string(depth + 1)))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+            Value::Func(f) => fn_display_name(&f.proto),
+            Value::Proto(p) => fn_display_name(p),
+            Value::Native(n) => format!("<native fn {}>", n.name),
+        }
+    }
+
+    fn nested_string(&self, depth: usize) -> String {
+        match self {
+            Value::Str(s) => format!("{s:?}"), // quoted + escaped inside containers
+            Value::Array(_) | Value::Map(_) => self.display_string(depth),
+            _ => self.display_string(depth),
+        }
+    }
+
+    /// Equality semantics: by value for null/bool/numbers/strings
+    /// (ints and floats compare numerically across types), by reference for
+    /// arrays, maps and functions.
+    pub fn equals(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Int(a), Value::Float(b)) => *a as f64 == *b,
+            (Value::Float(a), Value::Int(b)) => *a == *b as f64,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
+            (Value::Map(a), Value::Map(b)) => Rc::ptr_eq(a, b),
+            (Value::Func(a), Value::Func(b)) => Rc::ptr_eq(a, b),
+            (Value::Native(a), Value::Native(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    /// Ordering for `<`, `<=`, `>` and `>=`: numbers (int/float mixed) and
+    /// strings (lexicographic). `None` means the pair is not comparable.
+    pub fn num_cmp(a: &Value, b: &Value) -> Option<Ordering> {
+        match (a, b) {
+            (Value::Int(x), Value::Int(y)) => x.partial_cmp(y),
+            (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y),
+            (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)),
+            (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
+            (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
+            _ => None,
+        }
+    }
+}
+
+/// Display name for a function ("<fn add>", "<script>" is not used here).
+fn fn_display_name(p: &FnProto) -> String {
+    if p.name.is_empty() {
+        "<fn>".to_string()
+    } else {
+        format!("<fn {}>", p.name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn float_formatting() {
+        assert_eq!(Value::Float(1.0).display_string(0), "1.0");
+        assert_eq!(Value::Float(0.5).display_string(0), "0.5");
+        assert_eq!(Value::Float(0.1).display_string(0), "0.1");
+        assert_eq!(Value::Float(1e300).display_string(0), "1e300");
+    }
+
+    #[test]
+    fn container_formatting() {
+        let a = Value::Array(Rc::new(RefCell::new(vec![
+            Value::Int(1),
+            Value::str("two"),
+            Value::Float(3.0),
+        ])));
+        assert_eq!(a.display_string(0), "[1, \"two\", 3.0]");
+        let m = Value::Map(Rc::new(RefCell::new(HashMap::from([
+            ("b".to_string(), Value::Int(2)),
+            ("a".to_string(), Value::Int(1)),
+        ]))));
+        assert_eq!(m.display_string(0), "{\"a\": 1, \"b\": 2}");
+    }
+
+    #[test]
+    fn equality() {
+        assert!(Value::Int(1).equals(&Value::Float(1.0)));
+        assert!(!Value::Int(1).equals(&Value::Bool(true)));
+        assert!(Value::str("a").equals(&Value::str("a")));
+        let arr = Rc::new(RefCell::new(Vec::new()));
+        assert!(Value::Array(Rc::clone(&arr)).equals(&Value::Array(arr)));
+        assert!(!Value::Null.equals(&Value::Int(0)));
+    }
+}

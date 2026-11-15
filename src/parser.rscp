@@ -1,0 +1,1118 @@
+//! Recursive-descent parser with precedence climbing for binary operators.
+//!
+//! Produces an AST from the token stream. Stops at the first error
+//! (carrying its position), except that the REPL can ask whether the error
+//! was caused by end of input to keep reading lines.
+
+use crate::ast::*;
+use crate::errors::RscpError;
+use crate::token::{Lit, Token, TokenType};
+
+/// Maximum nesting depth of statements/expressions, to protect the Rust
+/// stack from pathological input such as thousands of nested parentheses.
+const MAX_DEPTH: usize = 300;
+
+const MAX_PARAMS: usize = 255;
+const MAX_ARGS: usize = 255;
+
+type PResult<T> = Result<T, RscpError>;
+
+pub struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+    depth: usize,
+}
+
+impl Parser {
+    pub fn new(tokens: Vec<Token>) -> Self {
+        Parser { tokens, pos: 0, depth: 0 }
+    }
+
+    /// Parse a whole program (a list of statements) up to end of input.
+    pub fn parse(mut self) -> PResult<Vec<Stmt>> {
+        let mut stmts = Vec::new();
+        while !self.at_eof() {
+            if self.match_ty(TokenType::Semicolon).is_some() {
+                continue; // empty statement (explicit or inserted)
+            }
+            let s = self.statement()?;
+            stmts.push(s);
+        }
+        Ok(stmts)
+    }
+
+    // ---- cursor helpers --------------------------------------------------
+
+    fn peek(&self) -> &Token {
+        &self.tokens[self.pos.min(self.tokens.len() - 1)]
+    }
+
+    fn peek_ty(&self) -> TokenType {
+        self.peek().ty
+    }
+
+    fn peek_at(&self, n: usize) -> &Token {
+        let i = (self.pos + n).min(self.tokens.len() - 1);
+        &self.tokens[i]
+    }
+
+    fn at_eof(&self) -> bool {
+        self.peek_ty() == TokenType::Eof
+    }
+
+    fn advance(&mut self) -> Token {
+        let t = self.tokens[self.pos.min(self.tokens.len() - 1)].clone();
+        if self.pos < self.tokens.len() - 1 {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn check(&self, ty: TokenType) -> bool {
+        self.peek_ty() == ty
+    }
+
+    fn match_ty(&mut self, ty: TokenType) -> Option<Token> {
+        if self.check(ty) {
+            Some(self.advance())
+        } else {
+            None
+        }
+    }
+
+    fn expect(&mut self, ty: TokenType, what: &str) -> PResult<Token> {
+        if self.check(ty) {
+            Ok(self.advance())
+        } else {
+            Err(self.error_here(format!("expected {what}, found {}", self.peek_ty().describe())))
+        }
+    }
+
+    fn error_here(&self, msg: impl Into<String>) -> RscpError {
+        let t = self.peek();
+        RscpError::parse(msg, t.line, t.col, t.ty == TokenType::Eof)
+    }
+
+    fn error_at(&self, tok: &Token, msg: impl Into<String>) -> RscpError {
+        RscpError::parse(msg, tok.line, tok.col, false)
+    }
+
+    /// Terminate a statement: a `;` (explicit or inserted), or the `}` of
+    /// the enclosing block, which makes the `;` optional (Go/Rust style).
+    fn end_statement(&mut self, what: &str) -> PResult<()> {
+        if self.match_ty(TokenType::Semicolon).is_some() {
+            return Ok(());
+        }
+        if self.check(TokenType::RBrace) {
+            return Ok(());
+        }
+        Err(self.error_here(format!(
+            "expected ';' (or '}}') {what}"
+        )))
+    }
+
+    fn enter(&mut self) -> PResult<()> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            Err(self.error_here("nesting is too deep"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+
+    // ---- statements --------------------------------------------------------
+
+    fn statement(&mut self) -> PResult<Stmt> {
+        self.enter()?;
+        let r = self.statement_inner();
+        self.leave();
+        r
+    }
+
+    fn statement_inner(&mut self) -> PResult<Stmt> {
+        use TokenType::*;
+        match self.peek_ty() {
+            Let | Var => {
+                let s = self.declaration()?;
+                self.end_statement("after declaration")?;
+                Ok(s)
+            }
+            Fn => self.fn_statement(),
+            If => self.if_statement(),
+            While => self.while_statement(),
+            Loop => self.loop_statement(),
+            For => self.for_statement(),
+            Return => self.return_statement(),
+            Break => {
+                let t = self.advance();
+                self.end_statement("after 'break'")?;
+                Ok(Stmt::new(StmtKind::Break, t.line, t.col))
+            }
+            Continue => {
+                let t = self.advance();
+                self.end_statement("after 'continue'")?;
+                Ok(Stmt::new(StmtKind::Continue, t.line, t.col))
+            }
+            LBrace => {
+                let t = self.peek().clone();
+                let stmts = self.block()?;
+                Ok(Stmt::new(StmtKind::Block(stmts), t.line, t.col))
+            }
+            _ => self.expr_or_assign_statement(true),
+        }
+    }
+
+    /// `let`/`var` declaration without the trailing semicolon
+    /// (the caller decides whether a `;` follows).
+    fn declaration(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // let | var
+        self.declaration_after(kw)
+    }
+
+    fn fn_statement(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // fn
+        let name = self.expect(TokenType::Ident, "a function name after 'fn'")?;
+        let func = self.func_body()?;
+        Ok(Stmt::new(
+            StmtKind::Fn {
+                name: name.lexeme.clone(),
+                func,
+            },
+            kw.line,
+            kw.col,
+        ))
+    }
+
+    /// Everything after the `fn` keyword: `(params) { body }` or, lighter,
+    /// `(params) -> expression` (an implicit `return`).
+    fn func_body(&mut self) -> PResult<FuncLit> {
+        let open = self.expect(TokenType::LParen, "'(' after function name")?;
+        let params = self.param_list(TokenType::RParen)?;
+        self.expect(TokenType::RParen, "')' after parameters")?;
+        if self.match_ty(TokenType::Arrow).is_some() {
+            let value = self.expression()?;
+            let body = vec![Stmt::new(
+                StmtKind::Return(Some(value)),
+                open.line,
+                open.col,
+            )];
+            return Ok(FuncLit { params, body, line: open.line, col: open.col });
+        }
+        let body = self.block()?;
+        Ok(FuncLit { params, body, line: open.line, col: open.col })
+    }
+
+    /// Comma-separated parameter names up to (not including) `end`.
+    fn param_list(&mut self, end: TokenType) -> PResult<Vec<String>> {
+        let mut params: Vec<String> = Vec::new();
+        if !self.check(end) {
+            loop {
+                let p = self.expect(TokenType::Ident, "a parameter name")?;
+                if params.iter().any(|x| *x == p.lexeme) {
+                    return Err(self.error_at(&p, format!("duplicate parameter '{}'", p.lexeme)));
+                }
+                params.push(p.lexeme.clone());
+                if params.len() > MAX_PARAMS {
+                    return Err(self.error_at(&p, format!("too many parameters (max is {MAX_PARAMS})")));
+                }
+                if self.match_ty(TokenType::Comma).is_none() {
+                    break;
+                }
+                if self.check(end) {
+                    break; // trailing comma is allowed
+                }
+            }
+        }
+        Ok(params)
+    }
+
+    fn if_statement(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // if
+        let cond = self.condition("if")?;
+        let then = Box::new(self.block_statement()?);
+        // `else` may sit on its own line: skip the ';' inserted at the
+        // previous line end (and any explicit empty statements).
+        while self.match_ty(TokenType::Semicolon).is_some() {}
+        let els = if self.match_ty(TokenType::Else).is_some() {
+            if self.check(TokenType::If) {
+                Some(Box::new(self.if_statement()?))
+            } else {
+                Some(Box::new(self.block_statement()?))
+            }
+        } else {
+            None
+        };
+        Ok(Stmt::new(StmtKind::If { cond, then, els }, kw.line, kw.col))
+    }
+
+    fn while_statement(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // while
+        let cond = self.condition("while")?;
+        let body = Box::new(self.block_statement()?);
+        Ok(Stmt::new(StmtKind::While { cond, body }, kw.line, kw.col))
+    }
+
+    /// `loop { body }` — an infinite loop (Rust-style `while true`).
+    fn loop_statement(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // loop
+        if !self.check(TokenType::LBrace) {
+            return Err(self.error_here("'{' to open the 'loop' body (braces are required)"));
+        }
+        let body = Box::new(self.block_statement()?);
+        let cond = Expr::new(ExprKind::Bool(true), kw.line, kw.col);
+        Ok(Stmt::new(StmtKind::While { cond, body }, kw.line, kw.col))
+    }
+
+    /// The condition of `if`/`while`: any expression, with or without
+    /// parentheses (the `{` of the body must stay on the same line).
+    fn condition(&mut self, kw: &str) -> PResult<Expr> {
+        let cond = self.expression()?;
+        if !self.check(TokenType::LBrace) {
+            return Err(self.error_here(format!(
+                "'{{' to open the '{kw}' body (braces are required, and the '{{' belongs on the same line as the condition)"
+            )));
+        }
+        Ok(cond)
+    }
+
+    fn for_statement(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // for
+
+        // Rust-style, no parentheses: `for x in iter { }`,
+        // optionally `for let x in iter { }` / `for var x in iter { }`.
+        if !self.check(TokenType::LParen) {
+            let mutable = if let Some(kw2) = self.match_let_var() {
+                kw2.ty == TokenType::Var
+            } else {
+                false // implicit fresh binding, like Rust's `for x in ...`
+            };
+            let name = self.expect(TokenType::Ident, "a loop variable name after 'for'")?;
+            self.expect(TokenType::In, "'in' after the loop variable")?;
+            let iter = self.expression()?;
+            if !self.check(TokenType::LBrace) {
+                return Err(self.error_here("'{' to open the 'for' body (braces are required)"));
+            }
+            let body = Box::new(self.block_statement()?);
+            return Ok(Stmt::new(
+                StmtKind::ForIn {
+                    mutable,
+                    name: name.lexeme.clone(),
+                    iter,
+                    body,
+                },
+                kw.line,
+                kw.col,
+            ));
+        }
+
+        // Parenthesized forms (all of 0.1.x): `for (let x in arr) { }` and
+        // the C-style `for (init; cond; step) { }`.
+        self.expect(TokenType::LParen, "'(' after 'for'")?;
+
+        // Distinguish `for (let x in arr)` from `for (let i = 0; ...)`.
+        let is_for_in = matches!(self.peek_ty(), TokenType::Let | TokenType::Var)
+            && self.peek_at(1).ty == TokenType::Ident
+            && self.peek_at(2).ty == TokenType::In;
+
+        if is_for_in {
+            let decl = self.advance();
+            let mutable = decl.ty == TokenType::Var;
+            let name = self.expect(TokenType::Ident, "a loop variable name")?;
+            self.expect(TokenType::In, "'in' after the loop variable")?;
+            let iter = self.expression()?;
+            self.expect(TokenType::RParen, "')' after 'for-in' iterable")?;
+            if !self.check(TokenType::LBrace) {
+                return Err(self.error_here("'{' to open the 'for' body (braces are required)"));
+            }
+            let body = Box::new(self.block_statement()?);
+            return Ok(Stmt::new(
+                StmtKind::ForIn {
+                    mutable,
+                    name: name.lexeme.clone(),
+                    iter,
+                    body,
+                },
+                kw.line,
+                kw.col,
+            ));
+        }
+
+        // C-style for: (init; cond; step) — keep the header on one line;
+        // the new `for i in a..b { }` form replaces it in most code.
+        let init = if self.match_ty(TokenType::Semicolon).is_some() {
+            None
+        } else {
+            let s = if let Some(_kw2) = self.match_let_var() {
+                self.declaration_after(_kw2)?
+            } else {
+                self.expr_or_assign_statement(false)?
+            };
+            self.expect(TokenType::Semicolon, "';' after the 'for' initializer")?;
+            Some(Box::new(s))
+        };
+        let cond = if self.check(TokenType::Semicolon) {
+            None
+        } else {
+            Some(self.expression()?)
+        };
+        self.expect(TokenType::Semicolon, "';' after the 'for' condition")?;
+        let step = if self.check(TokenType::RParen) {
+            None
+        } else {
+            Some(Box::new(self.expr_or_assign_statement(false)?))
+        };
+        self.expect(TokenType::RParen, "')' after the 'for' clauses")?;
+        if !self.check(TokenType::LBrace) {
+            return Err(self.error_here("'{' to open the 'for' body (braces are required)"));
+        }
+        let body = Box::new(self.block_statement()?);
+
+        Ok(Stmt::new(
+            StmtKind::ForC { init, cond, step, body },
+            kw.line,
+            kw.col,
+        ))
+    }
+
+    /// Consume a `let`/`var` keyword if present.
+    fn match_let_var(&mut self) -> Option<Token> {
+        if matches!(self.peek_ty(), TokenType::Let | TokenType::Var) {
+            Some(self.advance())
+        } else {
+            None
+        }
+    }
+
+    /// `let`/`var` declaration when the keyword was already consumed.
+    fn declaration_after(&mut self, kw: Token) -> PResult<Stmt> {
+        let mutable = kw.ty == TokenType::Var;
+        let name = self.expect(TokenType::Ident, "a variable name after 'let'/'var'")?;
+        self.expect(
+            TokenType::Assign,
+            "'=' and an initializer (RSCP variables are always initialized)",
+        )?;
+        let init = self.expression()?;
+        Ok(Stmt::new(
+            StmtKind::Let {
+                name: name.lexeme.clone(),
+                mutable,
+                init,
+            },
+            kw.line,
+            kw.col,
+        ))
+    }
+
+    fn return_statement(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // return
+        let value = if matches!(self.peek_ty(), TokenType::Semicolon | TokenType::RBrace) {
+            None
+        } else {
+            Some(self.expression()?)
+        };
+        self.end_statement("after 'return'")?;
+        Ok(Stmt::new(StmtKind::Return(value), kw.line, kw.col))
+    }
+
+    fn block_statement(&mut self) -> PResult<Stmt> {
+        let open = self.peek().clone();
+        let stmts = self.block()?;
+        Ok(Stmt::new(StmtKind::Block(stmts), open.line, open.col))
+    }
+
+    fn block(&mut self) -> PResult<Vec<Stmt>> {
+        self.enter()?;
+        let r = (|| {
+            self.expect(TokenType::LBrace, "'{'")?;
+            let mut stmts = Vec::new();
+            while !self.check(TokenType::RBrace) {
+                if self.at_eof() {
+                    return Err(self.error_here("unterminated block: expected '}'"));
+                }
+                if self.match_ty(TokenType::Semicolon).is_some() {
+                    continue; // empty statement
+                }
+                stmts.push(self.statement()?);
+            }
+            self.advance(); // }
+            Ok(stmts)
+        })();
+        self.leave();
+        r
+    }
+
+    /// An expression, an assignment, or an increment/decrement.
+    /// `want_semi` controls whether a terminating `;` is consumed.
+    fn expr_or_assign_statement(&mut self, want_semi: bool) -> PResult<Stmt> {
+        use TokenType::*;
+        let expr = self.expression()?;
+
+        if let Some(op_tok) = self.match_assign_op() {
+            let target = self.to_target(expr, &op_tok)?;
+            let value = self.expression()?;
+            let op = match op_tok.ty {
+                Assign => AssignOp::Set,
+                PlusAssign => AssignOp::AddSet,
+                MinusAssign => AssignOp::SubSet,
+                StarAssign => AssignOp::MulSet,
+                SlashAssign => AssignOp::DivSet,
+                PercentAssign => AssignOp::ModSet,
+                _ => unreachable!(),
+            };
+            if want_semi {
+                self.end_statement("after assignment")?;
+            }
+            Ok(Stmt::new(
+                StmtKind::Assign { target, op, value },
+                op_tok.line,
+                op_tok.col,
+            ))
+        } else if let Some(op_tok) = self
+            .match_ty(PlusPlus)
+            .or_else(|| self.match_ty(MinusMinus))
+        {
+            let target = self.to_target(expr, &op_tok)?;
+            if want_semi {
+                self.end_statement("after '++'/'--'")?;
+            }
+            Ok(Stmt::new(
+                StmtKind::IncDec { target, plus: op_tok.ty == PlusPlus },
+                op_tok.line,
+                op_tok.col,
+            ))
+        } else {
+            if want_semi {
+                self.end_statement("after expression")?;
+            }
+            let tok = self.peek().clone();
+            Ok(Stmt::new(StmtKind::Expr(expr), tok.line, tok.col))
+        }
+    }
+
+    fn match_assign_op(&mut self) -> Option<Token> {
+        use TokenType::*;
+        for ty in [Assign, PlusAssign, MinusAssign, StarAssign, SlashAssign, PercentAssign] {
+            if let Some(t) = self.match_ty(ty) {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    fn to_target(&self, expr: Expr, op_tok: &Token) -> PResult<Target> {
+        let (eline, ecol) = (expr.line, expr.col);
+        match expr.kind {
+            ExprKind::Ident(name) => Ok(Target::Ident { name, line: eline, col: ecol }),
+            ExprKind::Index { obj, idx } => Ok(Target::Index { obj: *obj, idx: *idx }),
+            _ => Err(RscpError::parse(
+                format!(
+                    "invalid assignment target (the left side of '{}' must be a variable or an index)",
+                    op_tok.lexeme
+                ),
+                eline,
+                ecol,
+                false,
+            )),
+        }
+    }
+
+    // ---- expressions ---------------------------------------------------------
+
+    fn expression(&mut self) -> PResult<Expr> {
+        self.enter()?;
+        let r = self.ternary();
+        self.leave();
+        r
+    }
+
+    fn ternary(&mut self) -> PResult<Expr> {
+        let cond = self.range_expr()?;
+        if let Some(q) = self.match_ty(TokenType::Question) {
+            let then = self.expression()?;
+            self.expect(TokenType::Colon, "':' in ternary expression")?;
+            let els = self.ternary()?; // right-associative
+            Ok(Expr::new(
+                ExprKind::Ternary {
+                    cond: Box::new(cond),
+                    then: Box::new(then),
+                    els: Box::new(els),
+                },
+                q.line,
+                q.col,
+            ))
+        } else {
+            Ok(cond)
+        }
+    }
+
+    /// `a..b` (exclusive) or `a..=b` (inclusive). Ranges are only valid as
+    /// the iterable of a `for` loop; that rule is enforced by the compiler.
+    fn range_expr(&mut self) -> PResult<Expr> {
+        let start = self.logic_or()?;
+        if matches!(self.peek_ty(), TokenType::DotDot | TokenType::DotDotEq) {
+            let tok = self.advance();
+            let end = self.logic_or()?;
+            return Ok(Expr::new(
+                ExprKind::Range {
+                    start: Box::new(start),
+                    end: Box::new(end),
+                    inclusive: tok.ty == TokenType::DotDotEq,
+                },
+                tok.line,
+                tok.col,
+            ));
+        }
+        Ok(start)
+    }
+
+    fn logic_or(&mut self) -> PResult<Expr> {
+        let mut lhs = self.logic_and()?;
+        while let Some(op) = self.match_ty(TokenType::OrOr) {
+            let rhs = self.logic_and()?;
+            lhs = Expr::new(
+                ExprKind::Logical {
+                    op: LogicalOp::Or,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                op.line,
+                op.col,
+            );
+        }
+        Ok(lhs)
+    }
+
+    fn logic_and(&mut self) -> PResult<Expr> {
+        let mut lhs = self.equality()?;
+        while let Some(op) = self.match_ty(TokenType::AndAnd) {
+            let rhs = self.equality()?;
+            lhs = Expr::new(
+                ExprKind::Logical {
+                    op: LogicalOp::And,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                op.line,
+                op.col,
+            );
+        }
+        Ok(lhs)
+    }
+
+    fn equality(&mut self) -> PResult<Expr> {
+        let mut lhs = self.comparison()?;
+        loop {
+            let op = match self.peek_ty() {
+                TokenType::EqEq => BinaryOp::Eq,
+                TokenType::NotEq => BinaryOp::Ne,
+                _ => return Ok(lhs),
+            };
+            let tok = self.advance();
+            let rhs = self.comparison()?;
+            lhs = Expr::new(
+                ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                tok.line,
+                tok.col,
+            );
+        }
+    }
+
+    fn comparison(&mut self) -> PResult<Expr> {
+        let mut lhs = self.term()?;
+        loop {
+            let op = match self.peek_ty() {
+                TokenType::Lt => BinaryOp::Lt,
+                TokenType::Le => BinaryOp::Le,
+                TokenType::Gt => BinaryOp::Gt,
+                TokenType::Ge => BinaryOp::Ge,
+                _ => return Ok(lhs),
+            };
+            let tok = self.advance();
+            let rhs = self.term()?;
+            lhs = Expr::new(
+                ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                tok.line,
+                tok.col,
+            );
+        }
+    }
+
+    fn term(&mut self) -> PResult<Expr> {
+        let mut lhs = self.factor()?;
+        loop {
+            let op = match self.peek_ty() {
+                TokenType::Plus => BinaryOp::Add,
+                TokenType::Minus => BinaryOp::Sub,
+                _ => return Ok(lhs),
+            };
+            let tok = self.advance();
+            let rhs = self.factor()?;
+            lhs = Expr::new(
+                ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                tok.line,
+                tok.col,
+            );
+        }
+    }
+
+    fn factor(&mut self) -> PResult<Expr> {
+        let mut lhs = self.unary()?;
+        loop {
+            let op = match self.peek_ty() {
+                TokenType::Star => BinaryOp::Mul,
+                TokenType::Slash => BinaryOp::Div,
+                TokenType::Percent => BinaryOp::Mod,
+                _ => return Ok(lhs),
+            };
+            let tok = self.advance();
+            let rhs = self.unary()?;
+            lhs = Expr::new(
+                ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                tok.line,
+                tok.col,
+            );
+        }
+    }
+
+    fn unary(&mut self) -> PResult<Expr> {
+        let op = match self.peek_ty() {
+            TokenType::Not => Some(UnaryOp::Not),
+            TokenType::Minus => Some(UnaryOp::Neg),
+            _ => None,
+        };
+        if let Some(op) = op {
+            let tok = self.advance();
+            let expr = self.unary()?;
+            Ok(Expr::new(
+                ExprKind::Unary { op, expr: Box::new(expr) },
+                tok.line,
+                tok.col,
+            ))
+        } else {
+            self.postfix()
+        }
+    }
+
+    fn postfix(&mut self) -> PResult<Expr> {
+        let mut expr = self.primary()?;
+        loop {
+            match self.peek_ty() {
+                TokenType::LParen => {
+                    let tok = self.advance();
+                    let mut args = Vec::new();
+                    if !self.check(TokenType::RParen) {
+                        loop {
+                            args.push(self.expression()?);
+                            if args.len() > MAX_ARGS {
+                                return Err(self.error_here(format!(
+                                    "too many arguments in a call (max is {MAX_ARGS})"
+                                )));
+                            }
+                            if self.match_ty(TokenType::Comma).is_none() {
+                                break;
+                            }
+                            if self.check(TokenType::RParen) {
+                                break; // trailing comma is allowed
+                            }
+                        }
+                    }
+                    self.expect(TokenType::RParen, "')' after arguments")?;
+                    expr = Expr::new(
+                        ExprKind::Call { callee: Box::new(expr), args },
+                        tok.line,
+                        tok.col,
+                    );
+                }
+                TokenType::LBracket => {
+                    let tok = self.advance();
+                    let idx = self.expression()?;
+                    self.expect(TokenType::RBracket, "']' after index")?;
+                    expr = Expr::new(
+                        ExprKind::Index { obj: Box::new(expr), idx: Box::new(idx) },
+                        tok.line,
+                        tok.col,
+                    );
+                }
+                _ => return Ok(expr),
+            }
+        }
+    }
+
+    fn primary(&mut self) -> PResult<Expr> {
+        use TokenType::*;
+        let tok = self.peek().clone();
+        let (line, col) = (tok.line, tok.col);
+        match tok.ty {
+            Int => {
+                self.advance();
+                let v = match tok.lit {
+                    Some(Lit::Int(i)) => i,
+                    _ => unreachable!(),
+                };
+                Ok(Expr::new(ExprKind::Int(v), line, col))
+            }
+            Float => {
+                self.advance();
+                let v = match tok.lit {
+                    Some(Lit::Float(f)) => f,
+                    _ => unreachable!(),
+                };
+                Ok(Expr::new(ExprKind::Float(v), line, col))
+            }
+            Str => {
+                self.advance();
+                let v = match tok.lit {
+                    Some(Lit::Str(s)) => s,
+                    _ => unreachable!(),
+                };
+                Ok(Expr::new(ExprKind::Str(v), line, col))
+            }
+            True => {
+                self.advance();
+                Ok(Expr::new(ExprKind::Bool(true), line, col))
+            }
+            False => {
+                self.advance();
+                Ok(Expr::new(ExprKind::Bool(false), line, col))
+            }
+            Null => {
+                self.advance();
+                Ok(Expr::new(ExprKind::Null, line, col))
+            }
+            Ident => {
+                self.advance();
+                Ok(Expr::new(ExprKind::Ident(tok.lexeme.clone()), line, col))
+            }
+            LParen => {
+                self.advance();
+                let e = self.expression()?;
+                self.expect(RParen, "')' after parenthesized expression")?;
+                Ok(e)
+            }
+            LBracket => {
+                self.advance();
+                let mut items = Vec::new();
+                if !self.check(RBracket) {
+                    loop {
+                        items.push(self.expression()?);
+                        if self.match_ty(Comma).is_none() {
+                            break;
+                        }
+                        if self.check(RBracket) {
+                            break; // trailing comma is allowed
+                        }
+                    }
+                }
+                self.expect(RBracket, "']' after array literal")?;
+                Ok(Expr::new(ExprKind::Array(items), line, col))
+            }
+            LBrace => {
+                self.advance();
+                let mut pairs = Vec::new();
+                if !self.check(RBrace) {
+                    loop {
+                        let key = self.expression()?;
+                        self.expect(Colon, "':' after map key")?;
+                        let value = self.expression()?;
+                        pairs.push((key, value));
+                        if self.match_ty(Comma).is_none() {
+                            break;
+                        }
+                        if self.check(RBrace) {
+                            break; // trailing comma is allowed
+                        }
+                    }
+                }
+                self.expect(RBrace, "'}' after map literal")?;
+                Ok(Expr::new(ExprKind::Map(pairs), line, col))
+            }
+            Fn => {
+                self.advance();
+                let func = self.func_body()?;
+                Ok(Expr::new(ExprKind::Func(Box::new(func)), line, col))
+            }
+            // Short closures: `|x| expr`, `|x, y| expr`, `|x| { ... }`, `|| expr`.
+            Pipe => self.short_closure(),
+            OrOr => self.short_closure(),
+            _ => Err(self.error_here(format!(
+                "unexpected {} in an expression",
+                tok.ty.describe()
+            ))),
+        }
+    }
+
+    /// Rust-style short closure. An expression body returns its value
+    /// implicitly; a block body needs an explicit `return` (RSCP blocks are
+    /// not expressions).
+    fn short_closure(&mut self) -> PResult<Expr> {
+        let open = self.peek().clone();
+        let mut params: Vec<String> = Vec::new();
+        if open.ty == TokenType::Pipe {
+            self.advance(); // opening '|'
+            params = self.param_list(TokenType::Pipe)?;
+            self.expect(TokenType::Pipe, "'|' after the closure parameters")?;
+        } else {
+            self.advance(); // '||' — a closure with no parameters
+        }
+        let body = if self.check(TokenType::LBrace) {
+            self.block()?
+        } else {
+            let value = self.expression()?;
+            vec![Stmt::new(StmtKind::Return(Some(value)), open.line, open.col)]
+        };
+        Ok(Expr::new(
+            ExprKind::Func(Box::new(FuncLit {
+                params,
+                body,
+                line: open.line,
+                col: open.col,
+            })),
+            open.line,
+            open.col,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn parse(src: &str) -> Vec<Stmt> {
+        let tokens = Lexer::new(src).tokenize().unwrap();
+        Parser::new(tokens).parse().unwrap()
+    }
+
+    fn parse_err(src: &str) -> RscpError {
+        let tokens = Lexer::new(src).tokenize().unwrap();
+        Parser::new(tokens).parse().unwrap_err()
+    }
+
+    #[test]
+    fn precedence() {
+        let stmts = parse("1 + 2 * 3 == 7;");
+        match &stmts[0].kind {
+            StmtKind::Expr(e) => match &e.kind {
+                ExprKind::Binary { op: BinaryOp::Eq, lhs, rhs } => {
+                    assert!(matches!(lhs.kind, ExprKind::Binary { op: BinaryOp::Add, .. }));
+                    assert!(matches!(rhs.kind, ExprKind::Int(7)));
+                }
+                other => panic!("bad shape: {other:?}"),
+            },
+            other => panic!("bad stmt: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn statements_shapes() {
+        let stmts = parse("let a = 1; var b = a; b += 2; b++; fn f(x) { return x; }");
+        assert!(matches!(stmts[0].kind, StmtKind::Let { mutable: false, .. }));
+        assert!(matches!(stmts[1].kind, StmtKind::Let { mutable: true, .. }));
+        assert!(matches!(stmts[2].kind, StmtKind::Assign { .. }));
+        assert!(matches!(stmts[3].kind, StmtKind::IncDec { plus: true, .. }));
+        assert!(matches!(stmts[4].kind, StmtKind::Fn { .. }));
+    }
+
+    #[test]
+    fn control_flow_shapes() {
+        let stmts = parse(
+            "if (a) { } else if (b) { } else { }\
+             while (x < 3) { x++; }\
+             for (let i = 0; i < 3; i++) { }\
+             for (let v in arr) { }",
+        );
+        assert!(matches!(stmts[0].kind, StmtKind::If { els: Some(_), .. }));
+        assert!(matches!(stmts[1].kind, StmtKind::While { .. }));
+        assert!(matches!(stmts[2].kind, StmtKind::ForC { .. }));
+        assert!(matches!(stmts[3].kind, StmtKind::ForIn { .. }));
+    }
+
+    #[test]
+    fn light_syntax_shapes() {
+        // The 2026.2.0.0 light style: no semicolons, no parentheses around
+        // conditions, ranges, loop, short closures, arrow functions.
+        let src = "\
+var total = 0
+for i in 0..10 {
+    if i % 2 == 0 { continue }
+    total += i
+}
+while total > 5 { total -= 5 }
+loop {
+    break
+}
+let double = |x| x * 2
+fn square(x) -> x * x
+for v in [1, 2, 3] { total += v }
+";
+        let stmts = parse(src);
+        assert!(matches!(stmts[0].kind, StmtKind::Let { mutable: true, .. }));
+        assert!(matches!(&stmts[1].kind, StmtKind::ForIn { name, .. } if name == "i"));
+        assert!(matches!(stmts[2].kind, StmtKind::While { .. }));
+        assert!(matches!(stmts[3].kind, StmtKind::While { .. })); // loop {}
+        assert!(matches!(&stmts[4].kind, StmtKind::Let { init, .. }
+            if matches!(&init.kind, ExprKind::Func(_))));
+        assert!(matches!(stmts[5].kind, StmtKind::Fn { .. }));
+        assert!(matches!(&stmts[6].kind, StmtKind::ForIn { .. }));
+    }
+
+    #[test]
+    fn range_shapes() {
+        let stmts = parse("for i in 0..n { } for i in 0..=n { } for i in 1..n-1 { }");
+        match &stmts[0].kind {
+            StmtKind::ForIn { iter, .. } => match &iter.kind {
+                ExprKind::Range { inclusive, end, .. } => {
+                    assert!(!*inclusive);
+                    assert!(matches!(end.kind, ExprKind::Ident(_))); // not n-1
+                }
+                other => panic!("bad range: {other:?}"),
+            },
+            other => panic!("bad stmt: {other:?}"),
+        }
+        match &stmts[2].kind {
+            StmtKind::ForIn { iter, .. } => match &iter.kind {
+                ExprKind::Range { end, .. } => {
+                    // `n-1` binds to the range end, not to the whole loop
+                    assert!(matches!(&end.kind, ExprKind::Binary { op: BinaryOp::Sub, .. }));
+                }
+                other => panic!("bad range: {other:?}"),
+            },
+            other => panic!("bad stmt: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn else_on_own_line() {
+        let stmts = parse("if a {\n    break\n}\nelse {\n    continue\n}");
+        match &stmts[0].kind {
+            StmtKind::If { els: Some(_), .. } => {}
+            other => panic!("bad stmt: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_statements() {
+        let stmts = parse(";;let a = 1;;let b = 2;;");
+        assert_eq!(stmts.len(), 2);
+        let stmts = parse("var x = 1\n;\nvar y = 2\n"); // inserted + explicit
+        assert_eq!(stmts.len(), 2);
+    }
+
+    #[test]
+    fn arrow_and_block_bodies() {
+        let stmts = parse("fn a(x) -> x + 1\nfn b(x) { return x + 1 }\nlet c = fn(x) -> x * 2");
+        match &stmts[0].kind {
+            StmtKind::Fn { func, .. } => {
+                assert_eq!(func.params, vec!["x"]);
+                assert_eq!(func.body.len(), 1);
+                assert!(matches!(func.body[0].kind, StmtKind::Return(Some(_))));
+            }
+            other => panic!("bad stmt: {other:?}"),
+        }
+        match &stmts[2].kind {
+            StmtKind::Let { init, .. } => assert!(matches!(&init.kind, ExprKind::Func(_))),
+            other => panic!("bad stmt: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn short_closures() {
+        let stmts = parse("let f = |x| x + 1\nlet g = |a, b| a * b\nlet h = || 42\nlet k = |x| { return x }");
+        for i in 0..4 {
+            match &stmts[i].kind {
+                StmtKind::Let { init, .. } => assert!(matches!(&init.kind, ExprKind::Func(_)), "stmt {i}"),
+                other => panic!("bad stmt {i}: {other:?}"),
+            }
+        }
+        match &stmts[0].kind {
+            StmtKind::Let { init, .. } => match &init.kind {
+                ExprKind::Func(f) => {
+                    assert_eq!(f.params, vec!["x"]);
+                    assert!(matches!(f.body[0].kind, StmtKind::Return(Some(_))));
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+        match &stmts[1].kind {
+            StmtKind::Let { init, .. } => match &init.kind {
+                ExprKind::Func(f) => assert_eq!(f.params, vec!["a", "b"]),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn multiline_expressions_without_semis() {
+        let src = "\
+var a = [
+    1,
+    2,
+]
+var m = {
+    \"k\": 1,
+}
+var s = 1 +
+    2
+fn f(
+    x,
+    y,
+) -> x + y
+";
+        let stmts = parse(src);
+        assert_eq!(stmts.len(), 4);
+        assert!(matches!(&stmts[0].kind, StmtKind::Let { init, .. } if matches!(init.kind, ExprKind::Array(_))));
+        assert!(matches!(&stmts[1].kind, StmtKind::Let { init, .. } if matches!(init.kind, ExprKind::Map(_))));
+        assert!(matches!(&stmts[2].kind, StmtKind::Let { init, .. } if matches!(init.kind, ExprKind::Binary { .. })));
+        assert!(matches!(stmts[3].kind, StmtKind::Fn { .. }));
+    }
+
+    #[test]
+    fn ternary_right_assoc() {
+        let stmts = parse("let x = a ? 1 : b ? 2 : 3;");
+        match &stmts[0].kind {
+            StmtKind::Let { init, .. } => {
+                assert!(matches!(init.kind, ExprKind::Ternary { .. }));
+                match &init.kind {
+                    ExprKind::Ternary { els, .. } => {
+                        assert!(matches!(els.kind, ExprKind::Ternary { .. }));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => panic!("bad stmt"),
+        }
+    }
+
+    #[test]
+    fn literals_and_calls() {
+        let stmts = parse("let a = [1, 2]; let m = {\"k\": 1}; let f = fn(x) { return x; }; f(m[\"k\"], a[0]);");
+        assert!(matches!(&stmts[0].kind, StmtKind::Let { init, .. } if matches!(init.kind, ExprKind::Array(_))));
+        assert!(matches!(&stmts[1].kind, StmtKind::Let { init, .. } if matches!(init.kind, ExprKind::Map(_))));
+        assert!(matches!(&stmts[2].kind, StmtKind::Let { init, .. } if matches!(init.kind, ExprKind::Func(_))));
+        assert!(matches!(&stmts[3].kind, StmtKind::Expr(e) if matches!(e.kind, ExprKind::Call { .. })));
+    }
+
+    #[test]
+    fn syntax_errors() {
+        // Since 2026.2.0.0 a statement may end without ';' — this parses fine.
+        assert_eq!(parse("let x = 1").len(), 1);
+        // A range parses anywhere; the compiler rejects non-`for` uses.
+        assert_eq!(parse("var a = 1..3;").len(), 1);
+        // An expression that is still open at EOF asks for more input (REPL).
+        assert!(parse_err("let x = 1 +").is_at_eof());
+        assert!(!parse_err("let x = 1 let y = 2;").is_at_eof());
+        assert!(matches!(parse_err("let x = ;"), RscpError::Parse { .. }));
+        assert!(matches!(parse_err("1 + 2 = 3;"), RscpError::Parse { .. })); // invalid target
+        assert!(matches!(parse_err("let x;"), RscpError::Parse { .. })); // needs initializer
+        assert!(matches!(parse_err("fn f(a, a) {}"), RscpError::Parse { .. })); // dup params
+        assert!(matches!(parse_err("if (x) 1;"), RscpError::Parse { .. })); // braces required
+        assert!(matches!(parse_err("if x { } 1 { }"), RscpError::Parse { .. })); // '{' after condition only
+        assert!(matches!(parse_err("for i in 0.. { }"), RscpError::Parse { .. })); // missing range end
+    }
+}

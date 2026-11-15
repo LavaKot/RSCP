@@ -1,0 +1,37 @@
+// Bubble sort with an early exit, plus a binary search over the result.
+fn bubbleSort(arr) {
+    var n = len(arr)
+    for i in 0..n {
+        var swapped = false
+        for j in 0..n - 1 - i {
+            if arr[j] > arr[j + 1] {
+                let tmp = arr[j]
+                arr[j] = arr[j + 1]
+                arr[j + 1] = tmp
+                swapped = true
+            }
+        }
+        if !swapped { break }   // already sorted
+    }
+    return arr
+}
+
+fn binarySearch(arr, needle) {
+    var lo = 0
+    var hi = len(arr) - 1
+    loop {
+        if lo > hi { return -1 }
+        let mid = (lo + hi) / 2
+        if arr[mid] == needle      { return mid }
+        else if arr[mid] < needle  { lo = mid + 1 }
+        else                       { hi = mid - 1 }
+    }
+}
+
+let data = [42, 7, 19, 3, 88, 1, 55, 20]
+println("before:", data)
+let sorted = bubbleSort(data)
+println("after: ", sorted)
+for needle in [1, 42, 99] {
+    println("index of", needle, "=", binarySearch(sorted, needle))
+}
