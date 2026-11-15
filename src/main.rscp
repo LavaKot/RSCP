@@ -32,7 +32,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "26.0.12.1";
+const VERSION: &str = "26.0.12.2";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)

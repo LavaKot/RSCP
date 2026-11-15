@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.1 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.2 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.1.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.2.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,7 +304,7 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So this release is `26.0.10.0` (`v26.0.12.1`); a hotfix on top of it would
+So this release is `26.0.10.0` (`v26.0.12.2`); a hotfix on top of it would
 be `26.0.10.1`, and the next feature release `26.0.11.0`. While the second
 number is `0`, GitHub releases are titled **"Beta …"** (e.g. "Beta
 26.0.10.0"); from the first stable release the prefix disappears.
@@ -317,6 +317,13 @@ README.
 
 ## Changelog
 
+* **26.0.12.2** — modules are isolated. A function defined in an imported
+  module resolves names against its own module's globals (a live snapshot
+  shared with every closure the module created), never against the
+  importer's — `leaker.leak()` now reads the module's `secret`, and writes
+  from module functions stay inside the module. Builtins remain visible;
+  the documented globals-leak hole is closed (found by `scripts/holes.py`).
+* **26.0.12.1** — local mutual recursion works. Sibling `fn` statements in
 * **26.0.12.1** — local mutual recursion works. Sibling `fn` statements in
   a function body or block pre-declare their cells, so `fn ping` can call a
   `fn pong` declared after it — the call resolves as an upvalue, not as an

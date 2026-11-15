@@ -133,6 +133,9 @@ pub struct Handler {
 struct ModuleCtx {
     path: String,
     saved_globals: GlobalMap,
+    /// The module's own globals, shared with every closure it created:
+    /// filled when the module finishes (26.0.12.2).
+    globals: Rc<RefCell<GlobalMap>>,
 }
 
 struct Frame {
@@ -242,7 +245,7 @@ impl Vm {
         self.stack.clear();
         self.frames.clear();
         self.handlers.clear();
-        let func = Rc::new(FunctionVal { proto, upvalues: Vec::new() });
+        let func = Rc::new(FunctionVal { proto, upvalues: Vec::new(), globals: None });
         self.stack.push(Value::Func(Rc::clone(&func)));
         self.frames.push(Frame { func, ip: 0, base: 0, module: None, ret_override: None });
         self.exec()
@@ -386,7 +389,26 @@ impl Vm {
                         // the name (26.0.9.0 — this used to to_string() the
                         // name on every global read).
                         let v = match &chunk.consts[ci as usize] {
-                            Value::Str(s) => self.globals.get(&**s).map(|c| c.value.clone()),
+                            Value::Str(s) => {
+                                if let Some(mg) = &func.globals {
+                                    // Module closure: its own module first;
+                                    // the outer table is only good for
+                                    // builtins (26.0.12.2).
+                                    let m = mg.borrow();
+                                    match m.get(&**s) {
+                                        Some(c) => Some(c.value.clone()),
+                                        None => self.globals.get(&**s).and_then(|c| {
+                                            if matches!(c.value, Value::Native(_)) {
+                                                Some(c.value.clone())
+                                            } else {
+                                                None
+                                            }
+                                        }),
+                                    }
+                                } else {
+                                    self.globals.get(&**s).map(|c| c.value.clone())
+                                }
+                            }
                             _ => rt_fatal!(op_ip, "internal error: global name constant is not a string"),
                         };
                         match v {
@@ -407,15 +429,54 @@ impl Vm {
                             Value::Str(s) => Rc::clone(s),
                             _ => rt_fatal!(op_ip, "internal error: global name constant is not a string"),
                         };
-                        match self.globals.get_mut(&*name) {
-                            None => rtc!(op_ip, "UNDEFINED_VAR", format!("undefined variable '{name}'")),
-                            Some(cell) => {
-                                if !cell.mutable && !self.repl {
-                                    rtc!(op_ip, "IMMUTABLE", format!(
-                                        "cannot assign to immutable variable '{name}' (declared with 'let')"
-                                    ));
+                        if let Some(mg) = &func.globals {
+                            // Module closure: write its own module's snapshot
+                            // (26.0.12.2). 0 = done, 1 = immutable, 2 = missing.
+                            let mut val = Some(v);
+                            let outcome = {
+                                let mut m = mg.borrow_mut();
+                                match m.get_mut(&*name) {
+                                    Some(cell) if cell.mutable || self.repl => {
+                                        cell.value = val.take().unwrap();
+                                        0
+                                    }
+                                    Some(_) => 1,
+                                    None => 2,
                                 }
-                                cell.value = v;
+                            };
+                            match outcome {
+                                0 => {}
+                                1 => rtc!(op_ip, "IMMUTABLE", format!(
+                                    "cannot assign to immutable variable '{name}' (declared with 'let')"
+                                )),
+                                _ => {
+                                    if self
+                                        .globals
+                                        .get(&*name)
+                                        .map_or(true, |c| matches!(c.value, Value::Native(_)))
+                                    {
+                                        mg.borrow_mut().insert(
+                                            name,
+                                            GlobalCell { value: val.take().unwrap(), mutable: true },
+                                        );
+                                    } else {
+                                        rtc!(op_ip, "UNDEFINED_VAR", format!(
+                                            "undefined variable '{name}' (it belongs to the importer)"
+                                        ));
+                                    }
+                                }
+                            }
+                        } else {
+                            match self.globals.get_mut(&*name) {
+                                None => rtc!(op_ip, "UNDEFINED_VAR", format!("undefined variable '{name}'")),
+                                Some(cell) => {
+                                    if !cell.mutable && !self.repl {
+                                        rtc!(op_ip, "IMMUTABLE", format!(
+                                            "cannot assign to immutable variable '{name}' (declared with 'let')"
+                                        ));
+                                    }
+                                    cell.value = v;
+                                }
                             }
                         }
                     }
@@ -789,7 +850,11 @@ impl Vm {
                                 upvalues.push(cell);
                             }
                         }
-                        self.stack.push(Value::Func(Rc::new(FunctionVal { proto, upvalues })));
+                        let globals = match &self.frames.last().unwrap().module {
+                            Some(m) => Some(Rc::clone(&m.globals)),
+                            None => func.globals.clone(),
+                        };
+                        self.stack.push(Value::Func(Rc::new(FunctionVal { proto, upvalues, globals })));
                     }
                     Op::Return => {
                         let result = self.stack.pop();
@@ -810,11 +875,15 @@ impl Vm {
                         let value = match frame.module {
                             Some(ctx) => {
                                 let mut map = crate::value::ValueMap::default();
-                                for (k, cell) in std::mem::take(&mut self.globals) {
+                                let module_globals = std::mem::take(&mut self.globals);
+                                for (k, cell) in &module_globals {
                                     if !matches!(cell.value, Value::Native(_)) {
-                                        map.insert(k, cell.value);
+                                        map.insert(Rc::clone(k), cell.value.clone());
                                     }
                                 }
+                                // Closures from this module resolve names
+                                // against this snapshot from now on (26.0.12.2).
+                                *ctx.globals.borrow_mut() = module_globals;
                                 self.globals = ctx.saved_globals;
                                 let v = Value::Map(Rc::new(RefCell::new(map)));
                                 self.modules.insert(ctx.path, v.clone());
@@ -1159,14 +1228,15 @@ impl Vm {
                             self.globals = HashMap::default();
                             crate::builtins::install(self);
                             self.frames.last_mut().unwrap().ip = ip;
-                            let func = Rc::new(FunctionVal { proto, upvalues: Vec::new() });
+                            let func = Rc::new(FunctionVal { proto, upvalues: Vec::new(), globals: None });
                             self.stack.push(Value::Func(Rc::clone(&func)));
                             let base2 = self.stack.len() - 1;
+                            let holder: Rc<RefCell<GlobalMap>> = Rc::new(RefCell::new(HashMap::default()));
                             self.frames.push(Frame {
                                 func,
                                 ip: 0,
                                 base: base2,
-                                module: Some(Box::new(ModuleCtx { path, saved_globals })),
+                                module: Some(Box::new(ModuleCtx { path, saved_globals, globals: holder })),
                                 ret_override: None,
                             });
                             continue 'outer;

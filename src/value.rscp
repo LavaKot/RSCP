@@ -92,6 +92,10 @@ pub fn detail(pairs: &[(&str, Value)]) -> Value {
 pub struct FunctionVal {
     pub proto: Rc<FnProto>,
     pub upvalues: Vec<Rc<RefCell<Upvalue>>>,
+    /// Module globals for closures defined inside an imported module: they
+    /// resolve names against their module, not against the importer's
+    /// globals (26.0.12.2). None for script functions.
+    pub globals: Option<Rc<RefCell<crate::vm::GlobalMap>>>,
 }
 
 /// A built-in function implemented in Rust.
