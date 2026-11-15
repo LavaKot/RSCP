@@ -556,6 +556,53 @@ impl Vm {
                             ip = t;
                         }
                     }
+                    Op::EnumIs => {
+                        // push Bool: is the local a variant of enum E named V?
+                        let slot = chunk.code[ip] as usize;
+                        ip += 1;
+                        let e_ci = read_u16(chunk, &mut ip);
+                        let v_ci = read_u16(chunk, &mut ip);
+                        let (ename, vname) = match (&chunk.consts[e_ci as usize], &chunk.consts[v_ci as usize]) {
+                            (Value::Str(e), Value::Str(v)) => (e, v),
+                            _ => rt_fatal!(op_ip, "internal error: EnumIs constants must be strings"),
+                        };
+                        let hit = match &self.stack[base + slot] {
+                            Value::Map(m) => {
+                                let mref = m.borrow();
+                                let is = |v: &Value, name: &Rc<str>| {
+                                    matches!(v, Value::Str(s) if s == name)
+                                };
+                                mref.get("__enum__").map_or(false, |e| is(e, ename))
+                                    && mref.get("__variant__").map_or(false, |v| is(v, vname))
+                            }
+                            _ => false,
+                        };
+                        self.stack.push(Value::Bool(hit));
+                    }
+                    Op::EnumBind => {
+                        // stack[base + dst] = local(m).args[arg_idx]
+                        let m_slot = chunk.code[ip] as usize;
+                        let arg_idx = chunk.code[ip + 1] as usize;
+                        let dst = chunk.code[ip + 2] as usize;
+                        ip += 3;
+                        let v = match &self.stack[base + m_slot] {
+                            Value::Map(m) => {
+                                let mref = m.borrow();
+                                match mref.get("args") {
+                                    Some(Value::Array(items)) => {
+                                        let items = items.borrow();
+                                        items.get(arg_idx).cloned()
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        };
+                        match v {
+                            Some(v) => self.stack[base + dst] = v,
+                            None => rt!(op_ip, "internal error: EnumBind on a value without that payload"),
+                        }
+                    }
                     Op::JumpIfFalsePeek | Op::JumpIfTruePeek => {
                         let t = read_u16(chunk, &mut ip) as usize;
                         let jump = match self.stack.last() {
@@ -948,11 +995,26 @@ impl Vm {
                         let rhs = self.stack.pop().unwrap();
                         let lhs = self.stack.pop().unwrap();
                         let hit = match (&lhs, &rhs) {
-                            (Value::Map(inst), Value::Map(_)) => inst
-                                .borrow()
-                                .get("__class__")
-                                .and_then(|c| class_chain_has(c, &rhs))
-                                .unwrap_or(false),
+                            (Value::Map(inst), Value::Map(cls)) => {
+                                // `x instanceof SomeEnum` (26.0.11.0): true
+                                // for any variant of that enum.
+                                let rhs_is_enum = cls
+                                    .borrow()
+                                    .get("__enum__")
+                                    .map_or(false, |v| matches!(v, Value::Str(_)));
+                                if rhs_is_enum {
+                                    inst.borrow().get("__enum__").map_or(false, |e| {
+                                        cls.borrow()
+                                            .get("__enum__")
+                                            .map_or(false, |c| e.equals(c))
+                                    })
+                                } else {
+                                    inst.borrow()
+                                        .get("__class__")
+                                        .and_then(|c| class_chain_has(c, &rhs))
+                                        .unwrap_or(false)
+                                }
+                            }
                             _ => false,
                         };
                         self.stack.push(Value::Bool(hit));

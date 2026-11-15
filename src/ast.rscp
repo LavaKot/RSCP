@@ -110,6 +110,13 @@ pub enum Pattern {
     Binding(String),
     /// `_` or `else`: matches anything.
     Wildcard,
+    /// `Shape.Circle` / `Shape.Rect(w, h)` — an enum-variant pattern
+    /// (26.0.11.0). `bindings` names the payload args for tuple variants.
+    EnumVariant {
+        enum_name: String,
+        variant: String,
+        bindings: Vec<String>,
+    },
 }
 
 /// The body of a `match` arm: an expression, or a block whose last
@@ -228,6 +235,13 @@ pub enum StmtKind {
         name: String,
         parent: Option<String>,
         methods: Vec<(String, FuncLit)>,
+    },
+    /// `enum Shape { Circle, Rect(w, h) }` (26.0.11.0). Unit variants are
+    /// values, payload variants are constructor functions; `match` patterns
+    /// can destructure them and the compiler checks exhaustiveness.
+    Enum {
+        name: String,
+        variants: Vec<(String, Vec<String>)>,
     },
     /// `try { body } catch ... { handler }` — runtime errors in `body` jump
     /// to the first clause whose guard accepts them; the error object

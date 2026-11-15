@@ -1,0 +1,2 @@
+enum S { R(w, h) }
+match x { S.R(a) => 1, else => 2 }

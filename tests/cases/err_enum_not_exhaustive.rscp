@@ -1,0 +1,5 @@
+enum Shape { Circle, Rect(w, h), Point }
+fn area(s) -> match s {
+    Shape.Circle => 1
+    Shape.Rect(w, h) => w * h
+}

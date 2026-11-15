@@ -6,6 +6,7 @@
 //! captured as upvalues (see `vm.rscp` for the runtime side).
 
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::*;
@@ -114,6 +115,7 @@ fn compile_in_chain(
         loops: Vec::new(),
         top_names: Vec::new(),
         temp_n: 0,
+        enums: HashMap::new(),
         base_dir: base_dir.to_path_buf(),
         chain,
     };
@@ -132,6 +134,10 @@ struct Compiler {
     top_names: Vec<String>,
     /// Counter for hidden `%mN`/`%rN` locals of nested match expressions.
     temp_n: usize,
+    /// Enums declared in this file: name -> [(variant, payload arity)].
+    /// Patterns and exhaustiveness checks only see same-file enums —
+    /// imports resolve at runtime (26.0.11.0).
+    enums: HashMap<String, Vec<(String, usize)>>,
     /// Directory of the file being compiled; `import` paths resolve here.
     base_dir: PathBuf,
     /// Canonical paths of the files being compiled (cycle detection).
@@ -484,6 +490,85 @@ impl Compiler {
                     self.drop_temps(1);
                 } else {
                     // Class bindings are immutable, like fn bindings.
+                    self.declare_local(name, false, s.line, s.col)?;
+                }
+            }
+            StmtKind::Enum { name, variants } => {
+                // An enum object is a plain map:
+                //   {"__enum__": name, "__variants__": [names...],
+                //    <unit variant>: {"__enum__", "__variant__", "args": []},
+                //    <tuple variant>: fn(params) -> the same map}
+                // The synthesized AST goes through the ordinary expression
+                // pipeline, so construction needs no new opcodes (26.0.11.0).
+                if self.enums.contains_key(name) {
+                    return Err(self.err(format!("enum '{name}' is already defined"), s.line, s.col));
+                }
+                self.enums.insert(
+                    name.clone(),
+                    variants.iter().map(|(n, p)| (n.clone(), p.len())).collect(),
+                );
+                let (sl, sc) = (s.line, s.col);
+                let str_e = |t: &str| Expr::new(ExprKind::Str(t.to_string()), sl, sc);
+                let variant_map = |vname: &str, params: &[String]| -> Expr {
+                    let args = params
+                        .iter()
+                        .map(|p| Expr::new(ExprKind::Ident(p.clone()), sl, sc))
+                        .collect();
+                    Expr::new(
+                        ExprKind::Map(vec![
+                            (str_e("__enum__"), str_e(name)),
+                            (str_e("__variant__"), str_e(vname)),
+                            (str_e("args"), Expr::new(ExprKind::Array(args), sl, sc)),
+                        ]),
+                        sl,
+                        sc,
+                    )
+                };
+                let names = variants
+                    .iter()
+                    .map(|(n, _)| str_e(n))
+                    .collect();
+                let mut entries: Vec<(Expr, Expr)> = vec![
+                    (str_e("__enum__"), str_e(name)),
+                    (str_e("__variants__"), Expr::new(ExprKind::Array(names), sl, sc)),
+                ];
+                for (vname, params) in variants {
+                    let val = if params.is_empty() {
+                        variant_map(vname, &[])
+                    } else {
+                        Expr::new(
+                            ExprKind::Func(Box::new(FuncLit {
+                                params: params.clone(),
+                                body: vec![Stmt::new(
+                                    StmtKind::Return(Some(variant_map(vname, params))),
+                                    sl,
+                                    sc,
+                                )],
+                                line: sl,
+                                col: sc,
+                            })),
+                            sl,
+                            sc,
+                        )
+                    };
+                    entries.push((str_e(vname), val));
+                }
+                let init = Expr::new(ExprKind::Map(entries), sl, sc);
+                self.expr(&init)?;
+                if self.at_top_level() {
+                    if self.top_names.iter().any(|n| n == name) {
+                        return Err(self.err(
+                            format!("'{name}' is already defined at the top level"),
+                            s.line,
+                            s.col,
+                        ));
+                    }
+                    self.top_names.push(name.clone());
+                    let gi = self.string_const(name, s.line, s.col)?;
+                    self.emit_u16(Op::DefineGlobalConst, gi, s.line, s.col);
+                    self.drop_temps(1);
+                } else {
+                    // Enum bindings are immutable, like fn/class bindings.
                     self.declare_local(name, false, s.line, s.col)?;
                 }
             }
@@ -1319,6 +1404,78 @@ impl Compiler {
         line: usize,
         col: usize,
     ) -> Result<(), RscpError> {
+        // Exhaustiveness (26.0.11.0): when an arm pattern names an enum
+        // variant, the match must either carry a catch-all or cover every
+        // declared variant of that enum. Guarded arms do not count (the
+        // guard may fail); a single enum per match.
+        let mut enum_name: Option<&String> = None;
+        let mut covered: Vec<&String> = Vec::new();
+        let mut has_catchall = false;
+        for arm in arms {
+            if arm.guard.is_some() {
+                continue; // guards can fail: such arms never guarantee coverage
+            }
+            if arm
+                .patterns
+                .iter()
+                .any(|p| matches!(p, Pattern::Binding(_) | Pattern::Wildcard))
+            {
+                has_catchall = true;
+                continue;
+            }
+            for p in &arm.patterns {
+                if let Pattern::EnumVariant { enum_name: en, variant, .. } = p {
+                    match enum_name {
+                        None => enum_name = Some(en),
+                        Some(prev) if prev != en => {
+                            return Err(self.err(
+                                format!("match arms mix different enums: '{prev}' and '{en}'"),
+                                line,
+                                col,
+                            ));
+                        }
+                        _ => {}
+                    }
+                    if !covered.iter().any(|c| c == &variant) {
+                        covered.push(variant);
+                    }
+                }
+            }
+        }
+        if let Some(en) = enum_name {
+            if !has_catchall {
+                match self.enums.get(en) {
+                    None => {
+                        return Err(self.err(
+                            format!(
+                                "unknown enum '{en}' (enums must be declared in the same file as the match)"
+                            ),
+                            line,
+                            col,
+                        ));
+                    }
+                    Some(declared) => {
+                        let missing: Vec<String> = declared
+                            .iter()
+                            .map(|(n, _)| n.as_str())
+                            .filter(|n| !covered.iter().any(|c| c == n))
+                            .map(|n| n.to_string())
+                            .collect();
+                        if !missing.is_empty() {
+                            return Err(self.err(
+                                format!(
+                                    "match on enum '{en}' is not exhaustive: missing variant(s): {}",
+                                    missing.join(", ")
+                                ),
+                                line,
+                                col,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         // The scrutinee lives in a hidden `%mN` local, the arm value in a
         // hidden `%rN` local (so arm scopes can close their bindings before
         // the value is produced). Both are forgotten again at the end:
@@ -1368,6 +1525,41 @@ impl Compiler {
                 self.emit_u8(Op::GetLocal, m_slot, line, col);
                 self.push_temp();
                 self.declare_local(name, false, line, col)?;
+            }
+            // Enum-variant payload bindings (26.0.11.0): create a cell per
+            // binding, then fill it from the variant's args.
+            if let Pattern::EnumVariant { bindings, .. } = &arm.patterns[0] {
+                for (i, b) in bindings.iter().enumerate() {
+                    self.emit(Op::Null, line, col);
+                    self.push_temp();
+                    let slot = self.declare_local(b, false, line, col)?;
+                    self.cur().proto.chunk.emit_op_u8_u8_u8(
+                        Op::EnumBind,
+                        m_slot,
+                        i as u8,
+                        slot,
+                        line,
+                        col,
+                    );
+                }
+            }
+            // Alternations must agree on the bound names.
+            let enum_binds: Vec<&Vec<String>> = arm
+                .patterns
+                .iter()
+                .filter_map(|p| match p {
+                    Pattern::EnumVariant { bindings, .. } => Some(bindings),
+                    _ => None,
+                })
+                .collect();
+            if let Some(first) = enum_binds.first() {
+                if enum_binds.iter().any(|b| *b != *first) {
+                    return Err(self.err(
+                        "alternation patterns must bind the same names",
+                        line,
+                        col,
+                    ));
+                }
             }
             let mut guard_fail: Option<usize> = None;
             let mut guard_pops = 0usize;
@@ -1503,6 +1695,44 @@ impl Compiler {
                 self.emit_u16(Op::Constant, hi_ci, line, col);
                 self.emit(if *inclusive { Op::Le } else { Op::Less }, line, col);
                 self.patch_jump(jf, line, col)?;
+            }
+            Pattern::EnumVariant { enum_name, variant, bindings } => {
+                // Validate against the same-file declaration, then one
+                // fused instruction decides the match (26.0.11.0).
+                let found = self
+                    .enums
+                    .get(enum_name)
+                    .and_then(|vs| vs.iter().find(|(n, _)| n == variant).map(|(_, a)| *a));
+                match found {
+                    None => {
+                        let msg = if self.enums.contains_key(enum_name) {
+                            format!("enum '{enum_name}' has no variant '{variant}'")
+                        } else {
+                            format!(
+                                "unknown enum '{enum_name}' (enums must be declared in the same file as the match)"
+                            )
+                        };
+                        return Err(self.err(msg, line, col));
+                    }
+                    Some(arity) => {
+                        if !bindings.is_empty() && bindings.len() != arity {
+                            return Err(self.err(
+                                format!(
+                                    "pattern '{enum_name}.{variant}' expects {arity} binding(s), got {}",
+                                    bindings.len()
+                                ),
+                                line,
+                                col,
+                            ));
+                        }
+                    }
+                }
+                let e_ci = self.string_const(enum_name, line, col)?;
+                let v_ci = self.string_const(variant, line, col)?;
+                self.cur()
+                    .proto
+                    .chunk
+                    .emit_op_u8_u16_u16(Op::EnumIs, m_slot, e_ci, v_ci, line, col);
             }
             Pattern::Binding(_) | Pattern::Wildcard => {}
         }
@@ -1697,6 +1927,34 @@ while total > 30 {
 ";
         let proto = compile_src(src);
         assert!(proto.chunk.code.contains(&(Op::Loop as u8)));
+    }
+
+    #[test]
+    fn enums_compile_and_check_exhaustiveness() {
+        // The enum object and its constructors come from ordinary opcodes.
+        let proto = compile_src(
+            "enum Shape { Circle, Rect(w, h) }\nvar a = Shape.Circle\nvar b = Shape.Rect(3, 4)\n",
+        );
+        assert!(proto.chunk.code.contains(&(Op::DefineGlobalConst as u8)));
+        // A full match destructures through the fused opcodes (top level,
+        // so the opcodes land in the script chunk itself).
+        let proto = compile_src(
+            "enum Shape { Circle, Rect(w, h), Point }\nvar r = match Shape.Rect(3, 4) {\n    Shape.Circle => 1\n    Shape.Rect(w, h) => w * h\n    Shape.Point => 0\n}\n",
+        );
+        assert!(proto.chunk.code.contains(&(Op::EnumIs as u8)));
+        assert!(proto.chunk.code.contains(&(Op::EnumBind as u8)));
+        // Missing variants are a compile error, naming what is missing.
+        let err = |src: &str| {
+            let tokens = Lexer::new(src).tokenize().unwrap();
+            let program = Parser::new(tokens).parse().unwrap();
+            format!("{}", compile(&program, Path::new("")).unwrap_err())
+        };
+        let e = err("enum E { A, B }\nmatch x { E.A => 1 }\n");
+        assert!(e.contains("not exhaustive") && e.contains("B"), "{e}");
+        assert!(err("match x { Nope.A => 1, else => 2 }\n").contains("unknown enum"));
+        assert!(err("enum E { A }\nmatch x { E.B => 1, else => 2 }\n").contains("no variant"));
+        assert!(err("enum A { X }\nenum B { Y }\nmatch v { A.X => 1, B.Y => 2, else => 3 }\n")
+            .contains("mix different enums"));
     }
 
     #[test]

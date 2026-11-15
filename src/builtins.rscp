@@ -140,9 +140,13 @@ fn n_float(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
 
 fn n_type(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
     let v = one_arg("type", &args)?;
-    // Instances report their class name; classes report "class" (2026.6.0).
+    // Instances report their class name; classes report "class" (2026.6.0);
+    // enum variants report their enum name (26.0.11.0).
     if let Value::Map(m) = &v {
         let mref = m.borrow();
+        if let Some(Value::Str(ename)) = mref.get("__enum__") {
+            return Ok(Value::str(ename.to_string()));
+        }
         if let Some(Value::Map(class)) = mref.get("__class__") {
             let name = class
                 .borrow()

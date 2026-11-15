@@ -1,0 +1,3 @@
+enum A { X }
+enum B { Y }
+match v { A.X => 1, B.Y => 2, else => 3 }

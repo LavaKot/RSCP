@@ -1,0 +1,70 @@
+# enum sum types (26.0.11.0): construction, matching, destructuring,
+# exhaustiveness, equality, instanceof, guards over payloads.
+enum Shape {
+    Circle,
+    Rect(w, h),
+    Point
+}
+
+# Every variant covered: this match compiles; remove one arm and it won't.
+fn area(s) -> match s {
+    Shape.Circle => 3.14159
+    Shape.Rect(w, h) => w * h
+    Shape.Point => 0
+}
+
+var shapes = [Shape.Circle, Shape.Rect(3, 4), Shape.Point]
+var total = 0
+for s in shapes { total += area(s) }
+println("total:", total)
+
+# Values and constructors: units are values, tuples are functions.
+println(Shape.Circle, Shape.Point, Shape.Rect(2, 5))
+
+# Equality is structural: same variant, equal payload.
+println(Shape.Circle == Shape.Circle,
+        Shape.Rect(3, 4) == Shape.Rect(3, 4),
+        Shape.Rect(3, 4) == Shape.Rect(4, 3),
+        Shape.Circle == Shape.Point)
+
+# type() names the enum; instanceof accepts any variant of it.
+println(type(Shape.Circle), type(Shape.Rect(1, 2)))
+println(Shape.Rect(1, 2) instanceof Shape, Shape.Circle instanceof Shape)
+
+# Guards over destructured payloads; alternation counts for exhaustiveness.
+enum Op { Add, Sub, Mul, Div }
+fn apply(o, a, b) -> match o {
+    Op.Add | Op.Sub => a + b
+    Op.Mul => a * b
+    Op.Div => a / b
+}
+println(apply(Op.Add, 2, 3), apply(Op.Sub, 10, 4), apply(Op.Mul, 3, 4), apply(Op.Div, 9, 3))
+
+fn describe(s) -> match s {
+    Shape.Rect(w, h) if w == h => "square"
+    Shape.Rect(w, h) if w > h => "wide"
+    Shape.Rect(w, _) => "tall"
+    Shape.Circle => "round"
+    Shape.Point => "dot"
+}
+println(describe(Shape.Rect(2, 2)), describe(Shape.Rect(5, 2)), describe(Shape.Rect(2, 5)),
+        describe(Shape.Circle), describe(Shape.Point))
+
+# A catch-all satisfies exhaustiveness; non-enum subjects take the else arm.
+println(match Shape.Point { Shape.Circle => "c", else => "not c" })
+println(match 5 { Op.Add => "op", _ => "other" })
+
+# Enum values are ordinary maps: they compose with everything.
+var counts = {}
+for s in shapes {
+    var k = str(type(s))
+    counts[k] = has(counts, k) ? counts[k] + 1 : 1
+}
+println(counts.Shape, len(keys(counts)))
+
+# Enum bindings inside closures keep working.
+var fns = []
+for i in 0..3 { push(fns, || Shape.Rect(i, i)) }
+var last = null
+for f in fns { last = f() }
+println(last, last == Shape.Rect(2, 2))

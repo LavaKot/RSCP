@@ -63,11 +63,14 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     depth: usize,
+    /// Inside a `match` arm guard: `=>` closes the guard, so `x => ...`
+    /// must not parse as an arrow closure there (26.0.11.0).
+    no_arrow: usize,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0, depth: 0 }
+        Parser { tokens, pos: 0, depth: 0, no_arrow: 0 }
     }
 
     /// Parse a whole program (a list of statements) up to end of input.
@@ -208,6 +211,7 @@ impl Parser {
             }
             Fn => self.fn_statement(),
             Class => self.class_statement(),
+            Enum => self.enum_statement(),
             If => self.if_statement(),
             While => self.while_statement(),
             Loop => self.loop_statement(),
@@ -295,6 +299,67 @@ impl Parser {
         self.advance(); // }
         Ok(Stmt::new(
             StmtKind::Class { name: name.lexeme.clone(), parent, methods },
+            kw.line,
+            kw.col,
+        ))
+    }
+
+    /// `enum Name { Unit, Tuple(a, b), ... }` (26.0.11.0). Unit variants
+    /// become values, tuple variants become constructor functions.
+    fn enum_statement(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // enum
+        let name = self.expect(TokenType::Ident, "an enum name after 'enum'")?;
+        if !self.check(TokenType::LBrace) {
+            return Err(self.error_here("'{' to open the enum body"));
+        }
+        self.advance(); // {
+        let mut variants: Vec<(String, Vec<String>)> = Vec::new();
+        loop {
+            if self.check(TokenType::RBrace) {
+                break;
+            }
+            if self.at_eof() {
+                return Err(self.error_here("unterminated enum body: expected '}'"));
+            }
+            if self.match_ty(TokenType::Semicolon).is_some() || self.match_ty(TokenType::Comma).is_some() {
+                continue;
+            }
+            let vname = self.expect(TokenType::Ident, "a variant name")?;
+            if variants.iter().any(|(n, _)| n == &vname.lexeme) {
+                return Err(self.error_at(&vname, format!("duplicate enum variant '{}'", vname.lexeme)));
+            }
+            let mut params: Vec<String> = Vec::new();
+            if self.match_ty(TokenType::LParen).is_some() {
+                loop {
+                    if self.check(TokenType::RParen) {
+                        break;
+                    }
+                    let p = self.expect(TokenType::Ident, "a variant parameter name")?;
+                    if params.iter().any(|x| x == &p.lexeme) {
+                        return Err(self.error_at(&p, format!("duplicate parameter '{}' in enum variant", p.lexeme)));
+                    }
+                    params.push(p.lexeme.clone());
+                    if self.match_ty(TokenType::Comma).is_some() {
+                        continue;
+                    }
+                    break;
+                }
+                self.expect(TokenType::RParen, "')' after the variant parameters")?;
+            }
+            variants.push((vname.lexeme.clone(), params));
+            if self.match_ty(TokenType::Comma).is_some() {
+                continue;
+            }
+            if !self.check(TokenType::RBrace) {
+                return Err(self.error_here("',' or '}' after an enum variant"));
+            }
+        }
+        self.advance(); // }
+        if variants.is_empty() {
+            return Err(self.error_at(&name, "an enum needs at least one variant"));
+        }
+        Ok(Stmt::new(
+            StmtKind::Enum { name: name.lexeme.clone(), variants },
             kw.line,
             kw.col,
         ))
@@ -1270,7 +1335,8 @@ impl Parser {
             }
             Ident => {
                 // `x => expr` — a one-parameter arrow closure (2026.5.6).
-                if self.peek_at(1).ty == TokenType::FatArrow {
+                // Not inside a match guard: there `=>` ends the guard.
+                if self.peek_at(1).ty == TokenType::FatArrow && self.no_arrow == 0 {
                     let name = self.advance(); // x
                     self.advance(); // =>
                     let body = self.arrow_body(name.line, name.col)?;
@@ -1291,12 +1357,14 @@ impl Parser {
             LParen => {
                 // `(x, y) => expr` — an arrow closure (2026.5.6). Told apart
                 // from a parenthesized expression by the '=>' after the
-                // matching ')'.
-                if let Some(close) = self.find_matching_paren() {
-                    if self.tokens[(close + 1).min(self.tokens.len() - 1)].ty
-                        == TokenType::FatArrow
-                    {
-                        return self.arrow_closure();
+                // matching ')' (not inside a match guard).
+                if self.no_arrow == 0 {
+                    if let Some(close) = self.find_matching_paren() {
+                        if self.tokens[(close + 1).min(self.tokens.len() - 1)].ty
+                            == TokenType::FatArrow
+                        {
+                            return self.arrow_closure();
+                        }
                     }
                 }
                 self.advance();
@@ -1413,7 +1481,13 @@ impl Parser {
                 }
             }
             let guard = if self.match_ty(TokenType::If).is_some() {
-                Some(self.expression()?)
+                // `=>` terminates the guard: parse it without arrow
+                // closures (`k if done => 1` guards on `done`, it is not
+                // the closure `done => 1`).
+                self.no_arrow += 1;
+                let g = self.expression();
+                self.no_arrow -= 1;
+                Some(g?)
             } else {
                 None
             };
@@ -1514,10 +1588,35 @@ impl Parser {
             Ident => {
                 self.advance();
                 if tok.lexeme == "_" {
-                    Ok(Pattern::Wildcard)
-                } else {
-                    Ok(Pattern::Binding(tok.lexeme.clone()))
+                    return Ok(Pattern::Wildcard);
                 }
+                // `Shape.Circle` / `Shape.Rect(w, h)` — an enum-variant
+                // pattern (26.0.11.0).
+                if self.check(TokenType::Dot) {
+                    self.advance(); // .
+                    let v = self.expect(TokenType::Ident, "a variant name after '.'")?;
+                    let mut bindings = Vec::new();
+                    if self.match_ty(TokenType::LParen).is_some() {
+                        loop {
+                            if self.check(TokenType::RParen) {
+                                break;
+                            }
+                            let b = self.expect(TokenType::Ident, "a binding name in the variant pattern")?;
+                            bindings.push(b.lexeme.clone());
+                            if self.match_ty(TokenType::Comma).is_some() {
+                                continue;
+                            }
+                            break;
+                        }
+                        self.expect(TokenType::RParen, "')' after the pattern bindings")?;
+                    }
+                    return Ok(Pattern::EnumVariant {
+                        enum_name: tok.lexeme.clone(),
+                        variant: v.lexeme.clone(),
+                        bindings,
+                    });
+                }
+                Ok(Pattern::Binding(tok.lexeme.clone()))
             }
             _ => Err(self.error_here(format!(
                 "expected a match pattern (a literal, a range, a name, '_' or 'else'), found {}",

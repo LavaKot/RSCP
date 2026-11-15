@@ -1,6 +1,6 @@
 [package]
 name = "rscp"
-version = "26.0.10"
+version = "26.0.11"
 edition = "2021"
 
 [[bin]]

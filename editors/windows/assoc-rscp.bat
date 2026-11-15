@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================
-rem  RSCP 26.0.10.0 - file association helper for Windows
+rem  RSCP 26.0.11.0 - file association helper for Windows
 rem
 rem  Registers the .rscp extension:
 rem    * "rscpfile" type with a plain-text description

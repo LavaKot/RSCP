@@ -1,0 +1,11 @@
+total: 15.14159
+Shape.Circle Shape.Point Shape.Rect(2, 5)
+true true false false
+Shape Shape
+true true
+5 14 12 3
+square wide tall round dot
+not c
+other
+3 1
+Shape.Rect(2, 2) true

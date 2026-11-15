@@ -1,0 +1,2 @@
+enum S { R }
+match x { S.Nope => 1, else => 2 }
