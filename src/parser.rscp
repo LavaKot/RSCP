@@ -157,13 +157,15 @@ impl Parser {
         None
     }
 
-    /// Terminate a statement: a `;` (explicit or inserted), or the `}` of
-    /// the enclosing block, which makes the `;` optional (Go/Rust style).
+    /// Terminate a statement: a `;` (explicit or inserted), the `}` of
+    /// the enclosing block, or a continuation keyword (`else`, `catch`)
+    /// directly after a brace-less single-statement body, where semicolon
+    /// insertion is suppressed before them.
     fn end_statement(&mut self, what: &str) -> PResult<()> {
         if self.match_ty(TokenType::Semicolon).is_some() {
             return Ok(());
         }
-        if self.check(TokenType::RBrace) {
+        if matches!(self.peek_ty(), TokenType::RBrace | TokenType::Else | TokenType::Catch) {
             return Ok(());
         }
         if let Some(e) = self.old_comment_hint() {
@@ -299,7 +301,7 @@ impl Parser {
     fn if_statement(&mut self) -> PResult<Stmt> {
         let kw = self.advance(); // if
         let cond = self.condition("if")?;
-        let then = Box::new(self.block_statement()?);
+        let then = Box::new(self.body_statement("if")?);
         // `else` may sit on its own line: skip the ';' inserted at the
         // previous line end (and any explicit empty statements).
         while self.match_ty(TokenType::Semicolon).is_some() {}
@@ -307,7 +309,7 @@ impl Parser {
             if self.check(TokenType::If) {
                 Some(Box::new(self.if_statement()?))
             } else {
-                Some(Box::new(self.block_statement()?))
+                Some(Box::new(self.body_statement("else")?))
             }
         } else {
             None
@@ -318,17 +320,15 @@ impl Parser {
     fn while_statement(&mut self) -> PResult<Stmt> {
         let kw = self.advance(); // while
         let cond = self.condition("while")?;
-        let body = Box::new(self.block_statement()?);
+        let body = Box::new(self.body_statement("while")?);
         Ok(Stmt::new(StmtKind::While { cond, body }, kw.line, kw.col))
     }
 
     /// `loop { body }` — an infinite loop (Rust-style `while true`).
+    /// A single statement without braces is allowed since 2026.5.6.
     fn loop_statement(&mut self) -> PResult<Stmt> {
         let kw = self.advance(); // loop
-        if !self.check(TokenType::LBrace) {
-            return Err(self.error_here("'{' to open the 'loop' body (braces are required)"));
-        }
-        let body = Box::new(self.block_statement()?);
+        let body = Box::new(self.body_statement("loop")?);
         let cond = Expr::new(ExprKind::Bool(true), kw.line, kw.col);
         Ok(Stmt::new(StmtKind::While { cond, body }, kw.line, kw.col))
     }
@@ -353,13 +353,22 @@ impl Parser {
                 }
             }
         }
-        let cond = self.expression()?;
-        if !self.check(TokenType::LBrace) {
+        self.expression()
+    }
+
+    /// The body of `if`/`else`/`while`/`loop`/`for`: a `{ }` block, or a
+    /// single statement without braces on the same line (2026.5.6):
+    /// `if ok print(x)`.
+    fn body_statement(&mut self, kw: &str) -> PResult<Stmt> {
+        if self.check(TokenType::LBrace) {
+            return self.block_statement();
+        }
+        if matches!(self.peek_ty(), TokenType::Semicolon | TokenType::Eof) {
             return Err(self.error_here(format!(
-                "'{{' to open the '{kw}' body (braces are required, and the '{{' belongs on the same line as the condition)"
+                "the '{kw}' body is missing: '{{' opens a block, or put one statement on the same line"
             )));
         }
-        Ok(cond)
+        self.statement()
     }
 
     /// Index of the `)` matching the `(` at the cursor, or None when the
@@ -398,10 +407,7 @@ impl Parser {
             let name = self.expect(TokenType::Ident, "a loop variable name after 'for'")?;
             self.expect(TokenType::In, "'in' after the loop variable")?;
             let iter = self.expression()?;
-            if !self.check(TokenType::LBrace) {
-                return Err(self.error_here("'{' to open the 'for' body (braces are required)"));
-            }
-            let body = Box::new(self.block_statement()?);
+            let body = Box::new(self.body_statement("for")?);
             return Ok(Stmt::new(
                 StmtKind::ForIn {
                     mutable,
@@ -1155,10 +1161,36 @@ impl Parser {
                 Ok(Expr::new(ExprKind::Null, line, col))
             }
             Ident => {
+                // `x => expr` — a one-parameter arrow closure (2026.5.6).
+                if self.peek_at(1).ty == TokenType::FatArrow {
+                    let name = self.advance(); // x
+                    self.advance(); // =>
+                    let body = self.arrow_body(name.line, name.col)?;
+                    return Ok(Expr::new(
+                        ExprKind::Func(Box::new(FuncLit {
+                            params: vec![name.lexeme.clone()],
+                            body,
+                            line: name.line,
+                            col: name.col,
+                        })),
+                        name.line,
+                        name.col,
+                    ));
+                }
                 self.advance();
                 Ok(Expr::new(ExprKind::Ident(tok.lexeme.clone()), line, col))
             }
             LParen => {
+                // `(x, y) => expr` — an arrow closure (2026.5.6). Told apart
+                // from a parenthesized expression by the '=>' after the
+                // matching ')'.
+                if let Some(close) = self.find_matching_paren() {
+                    if self.tokens[(close + 1).min(self.tokens.len() - 1)].ty
+                        == TokenType::FatArrow
+                    {
+                        return self.arrow_closure();
+                    }
+                }
                 self.advance();
                 let e = self.expression()?;
                 self.expect(RParen, "')' after parenthesized expression")?;
@@ -1369,6 +1401,31 @@ impl Parser {
                 "expected a match pattern (a literal, a range, a name, '_' or 'else'), found {}",
                 tok.ty.describe()
             ))),
+        }
+    }
+
+    /// `(x, y) => expr` — an arrow closure (2026.5.6), the `(` already
+    /// spotted at the cursor.
+    fn arrow_closure(&mut self) -> PResult<Expr> {
+        let open = self.advance(); // (
+        let params = self.param_list(TokenType::RParen)?;
+        self.expect(TokenType::RParen, "')' after closure parameters")?;
+        self.expect(TokenType::FatArrow, "'=>' after closure parameters")?;
+        let body = self.arrow_body(open.line, open.col)?;
+        Ok(Expr::new(
+            ExprKind::Func(Box::new(FuncLit { params, body, line: open.line, col: open.col })),
+            open.line,
+            open.col,
+        ))
+    }
+
+    /// The body after `=>`: an expression (implicit return) or a block.
+    fn arrow_body(&mut self, line: usize, col: usize) -> PResult<Vec<Stmt>> {
+        if self.check(TokenType::LBrace) {
+            self.block()
+        } else {
+            let value = self.expression()?;
+            Ok(vec![Stmt::new(StmtKind::Return(Some(value)), line, col)])
         }
     }
 
@@ -1744,7 +1801,8 @@ fn f(
         assert!(matches!(parse_err("1 + 2 = 3;"), RscpError::Parse { .. })); // invalid target
         assert!(matches!(parse_err("let x;"), RscpError::Parse { .. })); // needs initializer
         assert!(matches!(parse_err("fn f(a, a) {}"), RscpError::Parse { .. })); // dup params
-        assert!(matches!(parse_err("if (x) 1;"), RscpError::Parse { .. })); // braces required
+        assert!(matches!(parse_err("if x"), RscpError::Parse { .. })); // body missing
+        assert_eq!(parse("if x 1").len(), 1); // single-statement body (2026.5.6)
         assert!(matches!(parse_err("if x { } 1 { }"), RscpError::Parse { .. })); // '{' after condition only
         assert!(matches!(parse_err("for i in 0.. { }"), RscpError::Parse { .. })); // missing range end
         // Pre-2026.5.1 comments get a migration hint instead of a cryptic '/' error.

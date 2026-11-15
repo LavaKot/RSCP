@@ -1,0 +1,12 @@
+# single-statement bodies without braces + arrow closures (2026.5.6)
+var total = 0
+for i in 1..5 total += i
+if total == 10 print("ten")
+else print("not ten")
+while total > 0 total -= 5
+let double = x => x * 2
+let add = (a, b) => a + b
+let wrap = () => [1, 2]
+let withblock = (x) => { var t = x + 1
+    return t * 10 }
+println(total, double(21), add(1, 2), wrap(), withblock(1))

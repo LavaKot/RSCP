@@ -8,6 +8,7 @@
 #[path = "lexer.rscp"] mod lexer;
 #[path = "ast.rscp"] mod ast;
 #[path = "parser.rscp"] mod parser;
+#[path = "fmt.rscp"] mod fmt;
 #[path = "value.rscp"] mod value;
 #[path = "bytecode.rscp"] mod bytecode;
 #[path = "compiler.rscp"] mod compiler;
@@ -30,7 +31,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "2026.5.5.0";
+const VERSION: &str = "2026.5.6.0";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -42,6 +43,7 @@ USAGE:
     rscp disasm <file.rscp>   show compiled bytecode
     rscp tokens <file.rscp>   dump the token stream
     rscp ast <file.rscp>      dump the parse tree
+    rscp fmt [-w] <file.rscp> print the formatted code (-w: rewrite the file)
     rscp update               self-update from GitHub releases (Windows)
     rscp version              print the version
     rscp help                 show this help
@@ -50,10 +52,10 @@ LANGUAGE (light syntax):
     # comments run from '#' to the end of the line
     var total = 0             # no ';' needed at line ends
     for i in 0..10 { ... }    # ranges, no parentheses
-    if total > 5 { ... }      # braces required, no parens
+    if total > 5 { ... }      # braces optional, no parens
     if ok and not done { ... }  # word logic: and or not
     loop { break }            # infinite loop
-    let double = |x| x * 2    # short closures
+    let double = |x| x * 2    # short closures (also: x => x * 2)
     fn square(x) -> x * x     # arrow function body
     let s = match n {         # match expression with patterns
         0 => \"zero\", 1 | 2 => \"few\",
@@ -114,6 +116,7 @@ fn run_cli(args: &[String]) -> i32 {
         }
         Some("repl") => repl(),
         Some("update") => update(),
+        Some("fmt") => fmt_command(&args[1..]),
         Some(cmd @ ("run" | "tokens" | "ast" | "disasm")) => {
             let path = match args.get(1) {
                 Some(p) => p,
@@ -134,6 +137,50 @@ fn run_cli(args: &[String]) -> i32 {
                 64
             }
         }
+    }
+}
+
+/// `rscp fmt [-w] <file.rscp>` — print (or rewrite) the formatted code.
+fn fmt_command(args: &[String]) -> i32 {
+    let mut write_back = false;
+    let mut path: Option<&String> = None;
+    for a in args {
+        match a.as_str() {
+            "-w" | "--write" => write_back = true,
+            _ => path = Some(a),
+        }
+    }
+    let path = match path {
+        Some(p) => p,
+        None => {
+            eprintln!("error: 'rscp fmt' needs a file argument");
+            eprint!("{USAGE}");
+            return 64;
+        }
+    };
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{path}': {e}");
+            return 66;
+        }
+    };
+    match fmt::format_source(&source) {
+        Ok(out) => {
+            if write_back {
+                if out != source {
+                    if let Err(e) = fs::write(path, &out) {
+                        eprintln!("error: cannot write '{path}': {e}");
+                        return 66;
+                    }
+                }
+                println!("formatted {path}");
+            } else {
+                print!("{out}");
+            }
+            0
+        }
+        Err(e) => report_error(e, path, &source),
     }
 }
 

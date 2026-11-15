@@ -1,0 +1,329 @@
+//! `rscp fmt` — a conservative, comment-preserving token formatter.
+//!
+//! The formatter re-emits the token stream with canonical spacing, one
+//! statement per line and 4-space indentation. It never reorders or drops
+//! tokens (only redundant top-level `;` disappear), so the output parses
+//! to the same program; string literals and comments are reproduced
+//! verbatim. `rscp fmt` only needs the file to lex, not to compile.
+
+use crate::errors::RscpError;
+use crate::lexer::Lexer;
+use crate::token::{Token, TokenType};
+
+/// Format a whole source file.
+pub fn format_source(src: &str) -> Result<String, RscpError> {
+    let tokens = Lexer::new(src).tokenize_keep_comments()?;
+    Ok(Fmt::run(&tokens))
+}
+
+/// After these tokens a `{` opens an inline map literal (kept on one
+/// line) rather than a block. A `{` at statement position, after a
+/// value, or after `=>` (a match arm / closure block) is a block.
+fn brace_is_inline(prev: Option<TokenType>) -> bool {
+    use TokenType::*;
+    matches!(
+        prev,
+        Some(
+            Assign | PlusAssign | MinusAssign | StarAssign | SlashAssign | PercentAssign
+                | AmpAssign | PipeAssign | CaretAssign | ShlAssign | ShrAssign | StarStarAssign
+                | Comma | Colon | Question | LParen | LBracket | Return
+        )
+    )
+}
+
+/// Tokens that can end an expression; an operator right after one of
+/// these is binary, otherwise it is prefix (`-x`, `not x`, `!x`).
+fn ends_value(ty: TokenType) -> bool {
+    use TokenType::*;
+    matches!(
+        ty,
+        Ident | Int | Float | Str | Bytes | FStr | True | False | Null | RParen | RBracket
+            | RBrace | PlusPlus | MinusMinus
+    )
+}
+
+/// Should there be a space before `cur` (given the previous significant
+/// token `prev`)? Special cases: calls/indexes hug their `(`/`[`,
+/// ranges and `.` are tight, closing brackets need no leading space.
+fn space_rule(prev: TokenType, cur: TokenType) -> bool {
+    use TokenType::*;
+    if matches!(cur, RParen | RBracket | Comma | Dot | DotDot | DotDotEq) {
+        return false;
+    }
+    if matches!(prev, LParen | LBracket | Dot | DotDot | DotDotEq) {
+        return false;
+    }
+    if cur == LParen && matches!(prev, Ident | RParen | RBracket) {
+        return false; // f(x)
+    }
+    if cur == LBracket && matches!(prev, Ident | RParen | RBracket) {
+        return false; // a[i]
+    }
+    true
+}
+
+struct Fmt {
+    out: String,
+    indent: usize,
+    /// a line break is pending before the next token
+    pending_nl: bool,
+    /// last significant token emitted on the current line
+    last: Option<TokenType>,
+    /// its source line (to tell trailing comments from own-line ones)
+    last_line: usize,
+    /// per open brace: inline (map literal) or block
+    inline: Vec<bool>,
+    /// open `(` and `[` — `;` inside them is structural (for headers)
+    parens: usize,
+    /// paren depth at each open `?` (ternary colons vs slice colons)
+    ternary: Vec<usize>,
+    /// open `|param` closure pipes
+    pipes: usize,
+    /// the previous token was a prefix operator: no space after it
+    no_space_after: bool,
+}
+
+impl Fmt {
+    fn run(tokens: &[Token]) -> String {
+        let mut f = Fmt {
+            out: String::new(),
+            indent: 0,
+            pending_nl: false,
+            last: None,
+            last_line: 0,
+            inline: Vec::new(),
+            parens: 0,
+            ternary: Vec::new(),
+            pipes: 0,
+            no_space_after: false,
+        };
+        f.all(tokens);
+        while f.out.ends_with('\n') {
+            f.out.pop();
+        }
+        f.out.push('\n');
+        f.out
+    }
+
+    fn all(&mut self, tokens: &[Token]) {
+        for (i, t) in tokens.iter().enumerate() {
+            if t.ty == TokenType::Eof {
+                break;
+            }
+            let next = tokens[i + 1..]
+                .iter()
+                .find(|x| x.ty != TokenType::Comment)
+                .map(|x| x.ty);
+            self.one(t, next);
+        }
+    }
+
+    fn newline(&mut self) {
+        self.pending_nl = true;
+    }
+
+    fn flush_nl(&mut self) {
+        if self.pending_nl && !self.out.is_empty() {
+            self.out.push('\n');
+            for _ in 0..self.indent {
+                self.out.push_str("    ");
+            }
+        }
+        self.pending_nl = false;
+    }
+
+    /// Emit an ordinary token: a leading space when the rules say so,
+    /// then the lexeme verbatim.
+    fn emit(&mut self, t: &Token, spaced_before: bool) {
+        self.flush_nl();
+        let at_line_start = self.out.is_empty() || self.out.ends_with('\n');
+        if spaced_before && !at_line_start && !self.no_space_after {
+            self.out.push(' ');
+        }
+        self.out.push_str(&t.lexeme);
+        self.no_space_after = false;
+        self.last = Some(t.ty);
+        self.last_line = t.line;
+    }
+
+    /// The general path for tokens without special layout.
+    fn plain(&mut self, t: &Token) {
+        use TokenType::*;
+        let before = match self.last {
+            None => false,
+            Some(prev) => space_rule(prev, t.ty),
+        };
+        // Prefix operators (unary -, not, !, ~) hug their operand.
+        let prefix = matches!(t.ty, Minus | Plus | Not | NotWord | Tilde)
+            && !self.last.map_or(true, ends_value);
+        self.emit(t, before);
+        if prefix {
+            self.no_space_after = true;
+        }
+    }
+
+    fn one(&mut self, t: &Token, next: Option<TokenType>) {
+        use TokenType::*;
+        match t.ty {
+            Comment => {
+                // A trailing comment (same source line as the previous
+                // token) stays on that line; otherwise it gets its own.
+                if self.pending_nl && t.line == self.last_line {
+                    self.out.push(' ');
+                    self.out.push_str(&t.lexeme);
+                } else {
+                    self.flush_nl();
+                    self.out.push_str(&t.lexeme);
+                }
+                self.newline();
+                return; // a comment never changes spacing decisions
+            }
+            Semicolon => {
+                if self.parens > 0 {
+                    // structural ';' inside a for header: keep it
+                    self.emit(t, false);
+                } else {
+                    // a statement separator: the line break carries it
+                    self.newline();
+                }
+                return;
+            }
+            LBrace => {
+                let inline = brace_is_inline(self.last);
+                let before = self.last.is_some();
+                self.emit(t, before);
+                self.inline.push(inline);
+                if inline {
+                    self.no_space_after = true; // {"a": 1}
+                } else {
+                    self.indent += 1;
+                    self.newline();
+                }
+                return;
+            }
+            RBrace => {
+                let inline = self.inline.pop().unwrap_or(false);
+                if inline {
+                    // {"a": 1} — no space before the closing brace
+                    self.emit(t, false);
+                } else {
+                    self.indent = self.indent.saturating_sub(1);
+                    self.newline();
+                    self.emit(t, false);
+                    if matches!(next, Some(Else | Catch)) {
+                        self.out.push(' ');
+                        self.no_space_after = true; // "} else" stays one line
+                        return;
+                    }
+                    self.newline();
+                }
+                return;
+            }
+            LParen | LBracket => {
+                self.parens += 1;
+                self.plain(t);
+            }
+            RParen | RBracket => {
+                self.parens = self.parens.saturating_sub(1);
+                self.emit(t, false);
+            }
+            Question => {
+                self.ternary.push(self.parens);
+                self.emit(t, true);
+            }
+            Colon => {
+                if self.ternary.last() == Some(&self.parens) {
+                    self.ternary.pop();
+                    self.emit(t, true); // a ? x : y
+                } else {
+                    self.emit(t, false); // map key / slice bound: "k": 1, a[1:3]
+                    self.no_space_after = false;
+                }
+            }
+            Pipe => {
+                match self.last {
+                    // opening pipe of |params|
+                    Some(prev) if !ends_value(prev) && self.pipes == 0 => {
+                        self.pipes += 1;
+                        self.emit(t, true);
+                        self.no_space_after = true;
+                    }
+                    // closing pipe (params, or an empty || list)
+                    Some(prev) if self.pipes > 0 && (ends_value(prev) || prev == Pipe) => {
+                        self.pipes -= 1;
+                        self.emit(t, false);
+                    }
+                    // bitwise or
+                    _ => {
+                        self.emit(t, true);
+                    }
+                }
+            }
+            _ => {
+                self.plain(t);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn fmt(src: &str) -> String {
+        format_source(src).unwrap()
+    }
+
+    #[test]
+    fn fmt_is_idempotent_and_output_parses() {
+        let srcs = [
+            "let x=1\nlet y   =   x+2",
+            "fn  f( a,b ) { return a+b }\nprintln(f(1,2))",
+            "var m={\"a\":1,\"b\":[1,2,3],}\nprintln(m.a,m[ \"b\" ])",
+            "if x>5 { println(\"big\") } else println(\"small\")",
+            "# a comment\nlet s = \"str\" # trailing\nprintln(s)",
+            "for i in 0..10 { if i%2==0 { continue }\nwrite(i) }",
+            "let f=|x| x*2\nlet g=(a,b)=>a+b\nlet h=x=>x+1",
+            "let t = a ? 1 : 2\nlet sl = arr[1:3]",
+            "match n { 0 => \"zero\", 1|2 => \"few\", else => \"many\" }",
+            "for (var i = 0; i < 3; i++) { write(i) }",
+            "try { risky() } catch e { println(e) }",
+            "if ok { work() }\nelse if done { stop() }\nelse { wait() }",
+        ];
+        for src in srcs {
+            let once = fmt(src);
+            let twice = fmt(&once);
+            assert_eq!(
+                once, twice,
+                "not idempotent for:\n{src}\n-->\n{once}\n-->\n{twice}"
+            );
+            let tokens = Lexer::new(&once).tokenize().unwrap();
+            if let Err(e) = Parser::new(tokens).parse() {
+                panic!("fmt output does not parse ({e}):\n{src}\n-->\n{once}");
+            }
+        }
+    }
+
+    #[test]
+    fn fmt_indents_and_keeps_comments() {
+        let out = fmt("fn f(n){ if n>0 { return n } else { return -n } } # keep me\nlet x=f(3) # trailing note");
+        assert!(out.contains("fn f(n) {"), "fn line: {out}");
+        assert!(out.contains("    if n > 0 {"), "indent: {out}");
+        assert!(out.contains("} else {"), "else joined: {out}");
+        assert!(out.contains("# keep me"), "comment kept: {out}");
+        assert!(out.contains("let x = f(3) # trailing note"), "trailing: {out}");
+        // a comment between statements gets its own line
+        let out = fmt("a()\n# standalone\nb()");
+        assert!(out.contains("# standalone"), "standalone: {out}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.iter().filter(|l| **l == "# standalone").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn fmt_map_literal_stays_inline() {
+        let out = fmt("var m = {\"host\": \"localhost\", \"port\": 8080}\nprintln(m.port)");
+        assert!(out.contains("var m = {\"host\": \"localhost\", \"port\": 8080}"), "map inline: {out}");
+    }
+}

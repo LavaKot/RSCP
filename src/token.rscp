@@ -117,6 +117,8 @@ pub enum TokenType {
     NotWord,
     // End of input
     Eof,
+    /// A `#` comment, produced only by `tokenize_keep_comments` (for fmt).
+    Comment,
 }
 
 impl TokenType {
@@ -205,6 +207,7 @@ impl TokenType {
             Or => "'or'",
             NotWord => "'not'",
             Eof => "end of input",
+            Comment => "a comment",
         };
         s.to_string()
     }

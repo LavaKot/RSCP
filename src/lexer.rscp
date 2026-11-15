@@ -63,7 +63,17 @@ impl<'src> Lexer<'src> {
     }
 
     /// Tokenize the whole source.
-    pub fn tokenize(mut self) -> Result<Vec<Token>, RscpError> {
+    pub fn tokenize(self) -> Result<Vec<Token>, RscpError> {
+        self.tokenize_impl(false)
+    }
+
+    /// Tokenize keeping `#` comments as `TokenType::Comment` tokens
+    /// (used by `rscp fmt`); everything else is identical.
+    pub fn tokenize_keep_comments(self) -> Result<Vec<Token>, RscpError> {
+        self.tokenize_impl(true)
+    }
+
+    fn tokenize_impl(mut self, keep_comments: bool) -> Result<Vec<Token>, RscpError> {
         let mut tokens: Vec<Token> = Vec::new();
         let mut newline = false; // a newline was crossed since the last token
         while let Some(c) = self.peek() {
@@ -75,7 +85,22 @@ impl<'src> Lexer<'src> {
                     self.advance();
                     newline = true;
                 }
-                '#' => self.line_comment(),
+                '#' => {
+                    if keep_comments {
+                        // A comment ends its line: when the tokens so far
+                        // complete a statement, the ';' belongs before it
+                        // (a trailing comment stays on that statement).
+                        if tokens.last().map_or(false, |t| ends_statement(t.ty)) {
+                            let (l, c) = (self.line, self.col);
+                            tokens.push(synthetic_semicolon(l, c));
+                        }
+                        let tok = self.comment_token();
+                        newline = true;
+                        tokens.push(tok);
+                    } else {
+                        self.line_comment();
+                    }
+                }
                 _ => {
                     let tok = self.scan_token()?;
                     if newline
@@ -162,6 +187,19 @@ impl<'src> Lexer<'src> {
             }
             self.advance();
         }
+    }
+
+    /// A `#` comment as a token (only in the keep-comments mode): the
+    /// lexeme runs from '#' to (not including) the end of the line.
+    fn comment_token(&mut self) -> Token {
+        let (start, line, col) = (self.pos, self.line, self.col);
+        while let Some(c) = self.peek() {
+            if c == '\n' {
+                break;
+            }
+            self.advance();
+        }
+        self.tok(TokenType::Comment, start, line, col, None)
     }
 
     fn identifier(&mut self) -> Result<Token, RscpError> {

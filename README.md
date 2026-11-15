@@ -51,6 +51,8 @@ rscp repl                          # interactive session
 rscp disasm examples/hello.rscp    # inspect the bytecode
 rscp tokens file.rscp              # inspect the token stream
 rscp ast file.rscp                 # inspect the parse tree
+rscp fmt file.rscp                 # print the formatted code
+rscp fmt -w file.rscp              # ...or rewrite the file in place
 rscp update                        # self-update from GitHub (Windows)
 ```
 
@@ -58,7 +60,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.5.5.0 — enter statements, Ctrl-D to exit.
+rscp 2026.5.6.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -73,6 +75,23 @@ rscp> s
 Globals persist across lines, bare expressions are echoed, and a construct
 that is still open (a dangling operator, an unclosed `{`) continues onto the
 next line.
+
+### Formatting
+
+`rscp fmt` prints the canonical form of a file — one statement per line,
+4-space indentation, standard spacing — and `rscp fmt -w file.rscp`
+rewrites the file in place:
+
+```sh
+rscp fmt examples/fizzbuzz.rscp      # print the formatted code
+rscp fmt -w examples/fizzbuzz.rscp   # rewrite the file
+```
+
+The formatter is conservative: it re-emits the token stream without
+reordering or dropping anything (only redundant `;` disappear), so string
+literals and comments are preserved verbatim, the output always parses to
+the same program, and running `fmt` twice changes nothing. It works on any
+file that lexes, even one that does not fully compile yet.
 
 ### Windows & editors
 
@@ -90,7 +109,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.5.5.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.5.6.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -170,7 +189,8 @@ the Rust style:
 
 ```rust
 let double = |x| x * 2
-let add = |a, b| a + b
+let add = (a, b) => a + b          # arrow closures (2026.5.6)
+let one = x => x + 1
 let constant = || 42
 let withBlock = |x| {              # a block body needs an explicit return
     var t = x + 1
@@ -270,11 +290,12 @@ is integer division, C style (`7 / 2` is `3`, `-7 / 2` is `-3`).
 
 ### Control flow
 
-Braces are **required** for `if`/`while`/`loop`/`for` bodies — no
-dangling-else bugs — and conditions are written plain: `if x > 5 {`.
-Parentheses around the whole condition are a syntax error since 2026.5.2
-(parens that are part of a bigger expression, like `if (a + b) * c > 0 {`,
-still parse).
+Bodies are a `{ }` block or — since 2026.5.6 — a single statement on the
+same line: `if ok print(x)`, `for i in 0..5 total += i` (a `{` that opens a
+block stays on the condition's line). Conditions are written plain:
+`if x > 5 {`; parentheses around the whole condition are a syntax error
+since 2026.5.2 (parens that are part of a bigger expression, like
+`if (a + b) * c > 0 {`, still parse).
 
 ```rust
 if x < 10 { println("low") }
@@ -581,10 +602,11 @@ fnStmt         := "fn" IDENT funcBody ;
 funcBody       := "(" [ paramList ] ")" ( block | "->" expression ) ;
 paramList      := IDENT { "," IDENT } [ "," ] ;   (* trailing comma ok *)
 
-ifStmt         := "if" expression block
-                  [ "else" ( ifStmt | block ) ] ;
-whileStmt      := "while" expression block ;
-loopStmt       := "loop" block ;
+body           := block | statement ;  (* braces, or one statement *)
+ifStmt         := "if" expression body
+                  [ "else" ( ifStmt | body ) ] ;
+whileStmt      := "while" expression body ;
+loopStmt       := "loop" body ;
 forStmt        := "for" ( forHead ")" block                       (* legacy *)
                             | ["let"|"var"] IDENT "in" expression block ) ;
 forHead        := "(" ( forInit? ";" expression? ";" forStep?
@@ -630,7 +652,8 @@ arm            := pattern { "|" pattern } [ "if" expression ] "=>"
                   ( expression | block ) ;
 pattern        := INT [ ( ".." | "..=" ) INT ] | FLOAT | STRING
                 | "true" | "false" | "null" | IDENT | "else" ;  (* "_" is IDENT *)
-closure        := ( "|" paramList "|" | "||" ) ( expression | block ) ;
+closure        := ( "|" paramList "|" | "||" | IDENT "=>"
+                   | "(" paramList ")" "=>" ) ( expression | block ) ;
 arrayLit       := "[" [ expression { "," expression } [ "," ] ] "]" ;
 mapLit         := "{" [ expression ":" expression { "," … } [ "," ] ] "}" ;
 ```
@@ -694,13 +717,14 @@ source (.rscp) ──► lexer ──► parser ──► compiler ──► byt
 | `src/lexer.rscp`  | source → tokens (positions, literals, comments, `;` insertion) |
 | `src/ast.rscp`    | expression/statement tree |
 | `src/parser.rscp` | recursive descent + precedence climbing |
+| `src/fmt.rscp`   | `rscp fmt` — token-level formatter |
 | `src/errors.rscp` | unified error type, source-annotated rendering |
 | `src/bytecode.rscp` | 54 opcodes, chunks, prototypes, disassembler |
 | `src/compiler.rscp` | AST → bytecode; locals, upvalue capture, loop patching |
 | `src/value.rscp`  | runtime values (`Rc`/`RefCell` reference types) |
 | `src/vm.rscp`     | stack machine: frames, call stack, upvalue closing |
 | `src/builtins.rscp` | 19 native functions |
-| `src/main.rscp`   | CLI (`run`, `repl`, `disasm`, `tokens`, `ast`) |
+| `src/main.rscp`   | CLI (`run`, `repl`, `disasm`, `tokens`, `ast`, `fmt`) |
 
 Design highlights:
 
@@ -740,10 +764,10 @@ Design highlights:
 cargo test
 ```
 
-* **57 unit tests** across lexer (including the semicolon-insertion rules),
+* **63 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **104 golden cases** in `tests/cases/`: each program's exact stdout is
+* **105 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
@@ -761,7 +785,7 @@ cargo test
 | condition parens | no | no | no (a syntax error since 2026.5.2) |
 | bindings | implicit | `let` / `let mut` | `let` / `var` |
 | functions | `def f(x):` | `fn f(x) { }` | `fn f(x) { }` or `fn f(x) -> expr` |
-| lambdas | `lambda x: x` | `\|x\| x` | `\|x\| x` |
+| lambdas | `lambda x: x` | `\|x\| x` | `\|x\| x`, `x => x` |
 | loops | `for i in range(n)` | `for i in 0..n` | `for i in 0..n` |
 | infinite loop | `while True:` | `loop { }` | `loop { }` |
 | slices | `a[1:3]`, `a[::-1]` | `&a[1..3]` | `a[1:3]`, `a[::-1]` |
@@ -789,18 +813,25 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.5.5` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.5.5.0`), release
+(`2026.5.6` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.5.6.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.5.6.0** — readability. `rscp fmt` — a conservative, comment-
+  preserving formatter (one statement per line, 4-space indentation,
+  canonical spacing; `-w` rewrites in place, output always parses to the
+  same program and is idempotent). Arrow closures `x => expr` and
+  `(a, b) => expr` join the `|x|` form. `if`/`else`/`while`/`loop`/`for`
+  bodies may be a single statement without braces: `if ok print(x)`.
+  63 unit tests, 105 golden cases.
 * **2026.5.5.0** — `print` and friends. `print(...)` is now the Python-style
   primary: it ends the line (`println` stays as an alias, and the no-newline
   form is the new `write`). `nil` and `none` are synonyms of `null`.
   `var x` without an initializer declares `x` as `null`; `let` still
-  requires one. 61 unit tests, 104 golden cases.
+  requires one. 60 unit tests, 104 golden cases.
 * **2026.5.4.0** — slices and negative indexes, Python style.
   `a[start:end:step]` right in the index brackets (any part optional,
   negative bounds count from the end, a negative step walks backwards —
