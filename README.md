@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.10 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.11 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.10.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.11.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,7 +304,7 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So the current release is `26.0.12.3` (`v26.0.12.10`); a hotfix on top of
+So the current release is `26.0.12.3` (`v26.0.12.11`); a hotfix on top of
 it would be `26.0.12.4`, and the next feature release `26.0.13.0`. While
 the second number is `0`, GitHub releases are titled **"Beta …"** (e.g.
 "Beta 26.0.12.3"); from the first stable release the prefix disappears.
@@ -318,6 +318,17 @@ README.
 
 ## Changelog
 
+* **26.0.12.11** — deep nesting cannot crash the interpreter anymore.
+  Five stack-exhaustion vectors found by `scripts/recon.py` all end in a
+  clean error or a normal exit now: `!!!!…` unary chains and `2**2**2…`
+  powers hit the parser's depth cap ("nesting is too deep"); 10k-term
+  `a+a+a…` chains, 200k-long `a[0][0]…` index and `.x.x…` field spines
+  exceed a new compiler depth cap ("expression nesting is too deep",
+  limit 8192); deeply nested *values* (`a = [a]` in a 200k loop) used to
+  abort at teardown in recursive Rc drop glue — the CLI now runs on a
+  1 GiB stack thread and leaks the VM on exit instead of dropping it.
+  AST teardown itself is iterative (`Drop for Expr` drains children with
+  an explicit work stack), so error paths can't overflow either.
 * **26.0.12.10** — `super.name(...)` inside a nested fn or closure used to
   panic the VM ("index out of bounds": the closure's frame has no `self`
   slot). It is a compile error now — "super.x(...) can only be called

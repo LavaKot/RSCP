@@ -118,6 +118,7 @@ fn compile_in_chain(
             pending: 0,
         }],
         loops: Vec::new(),
+        expr_depth: 0,
         top_names: Vec::new(),
         temp_n: 0,
         enums: HashMap::new(),
@@ -137,6 +138,9 @@ fn compile_in_chain(
 struct Compiler {
     fns: Vec<FnCtx>,
     loops: Vec<LoopCtx>,
+    /// Recursion depth of expr(); AST spines (a+a+a…, a[0][0]…)
+    /// bypass the parser's syntactic depth cap (26.0.12.11).
+    expr_depth: usize,
     /// Names already declared at the script top level (duplicate detection).
     top_names: Vec<String>,
     /// Counter for hidden `%mN`/`%rN` locals of nested match expressions.
@@ -1283,7 +1287,27 @@ impl Compiler {
 
     // ---- expressions --------------------------------------------------------
 
+    /// Expression ceiling: the parser caps *syntactic* nesting at 300, but
+    /// iterative loops still build deep AST spines (`a+a+a…`, `a[0][0]…`),
+    /// and recursive compilation of those overflowed the Rust stack
+    /// (26.0.12.11). Real code never approaches this bound.
+    const MAX_EXPR_DEPTH: usize = 8192;
+
     fn expr(&mut self, e: &Expr) -> Result<(), RscpError> {
+        if self.expr_depth >= Self::MAX_EXPR_DEPTH {
+            return Err(self.err(
+                "expression nesting is too deep (the chain of operations exceeds 8192)",
+                e.line,
+                e.col,
+            ));
+        }
+        self.expr_depth += 1;
+        let r = self.expr_inner(e);
+        self.expr_depth -= 1;
+        r
+    }
+
+    fn expr_inner(&mut self, e: &Expr) -> Result<(), RscpError> {
         match &e.kind {
             ExprKind::Int(v) => {
                 let ci = self.constant(Value::Int(*v), e.line, e.col)?;

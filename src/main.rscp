@@ -32,7 +32,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "26.0.12.10";
+const VERSION: &str = "26.0.12.11";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -99,7 +99,18 @@ fn main() {
         eprintln!("{msg}");
     }));
     let args: Vec<String> = env::args().skip(1).collect();
-    exit(run_cli(&args));
+    // Run everything on a 1 GiB stack (26.0.12.12): the default 8 MiB
+    // overflowed while dropping deeply nested values (`a = [a]` in a
+    // 200k loop) — recursive Rc drop glue is not catchable. The VM's own
+    // call-depth guard (1024 frames) still bounds user recursion, so the
+    // big stack only buys headroom for teardown and other glue.
+    let code = std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(move || run_cli(&args))
+        .map_err(|e| eprintln!("cannot start the run thread: {e}"))
+        .and_then(|h| h.join().map_err(|_| eprintln!("the run thread panicked")))
+        .unwrap_or(101);
+    exit(code);
 }
 
 fn run_cli(args: &[String]) -> i32 {
@@ -262,6 +273,12 @@ fn file_command(cmd: &str, path: &str) -> i32 {
             }
             let result = vm.run_script(proto);
             vm.out.flush();
+            // Leak the VM on purpose (26.0.12.12): globals may hold deeply
+            // nested values whose recursive drop glue could overflow even
+            // the big stack; the process exits right after and the OS
+            // reclaims everything. Same trick as CPython's exit-time
+            // "don't bother deallocating".
+            std::mem::forget(vm);
             match result {
                 Ok(()) => 0,
                 Err(e) => report_error(e, path, &source),
@@ -401,6 +418,9 @@ fn repl() -> i32 {
         }
         buf.clear();
     }
+    // Leak the REPL VM on purpose (26.0.12.12): session globals may hold
+    // deeply nested values; the process is about to exit anyway.
+    std::mem::forget(vm);
     0
 }
 

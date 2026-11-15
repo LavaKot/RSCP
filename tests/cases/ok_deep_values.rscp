@@ -1,0 +1,11 @@
+# Deeply nested VALUES must not crash the interpreter (26.0.12.11):
+# teardown, comparison and mid-program drops all used to overflow the
+# recursive Rc drop glue. Now: big-stack runner + leak-on-exit.
+var a = []
+for i in 0..200000 { a = [a] }
+println("built", len(str(a)))
+var b = []
+for i in 0..200000 { b = [b] }
+println(a == a, a == b)
+a = null
+println("dropped mid-program")

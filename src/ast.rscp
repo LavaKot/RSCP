@@ -202,6 +202,117 @@ impl Expr {
     pub fn new(kind: ExprKind, line: usize, col: usize) -> Self {
         Expr { line, col, kind }
     }
+
+    /// Move every child expression into `out`, replacing each with a cheap
+    /// leaf. Deep spines (`a+a+a…` / `a[0][0]…` 200k nodes) are built by
+    /// iterative parser loops, and the default recursive drop glue for
+    /// those overflowed the Rust stack (26.0.12.11).
+    fn drain_children(&mut self, out: &mut Vec<Expr>) {
+        let leaf = || Expr { line: 0, col: 0, kind: ExprKind::Null };
+        macro_rules! take {
+            ($e:expr) => {
+                out.push(std::mem::replace($e, leaf()))
+            };
+        }
+        macro_rules! take_box {
+            ($b:expr) => {
+                take!(&mut **$b)
+            };
+        }
+        macro_rules! take_opt {
+            ($o:expr) => {
+                if let Some(b) = $o {
+                    take!(b)
+                }
+            };
+        }
+        match &mut self.kind {
+            ExprKind::Unary { expr, .. } => take_box!(expr),
+            ExprKind::Binary { lhs, rhs, .. } | ExprKind::Logical { lhs, rhs, .. } => {
+                take_box!(lhs);
+                take_box!(rhs);
+            }
+            ExprKind::Ternary { cond, then, els } => {
+                take_box!(cond);
+                take_box!(then);
+                take_box!(els);
+            }
+            ExprKind::Match { value, arms } => {
+                take_box!(value);
+                for arm in arms {
+                    if let Some(g) = &mut arm.guard {
+                        take!(g);
+                    }
+                    if let MatchBody::Expr(e) = &mut arm.body {
+                        take!(e);
+                    }
+                    // Block bodies hold Stmts: their nesting is capped by the
+                    // parser's MAX_DEPTH, so their drop glue is safe.
+                }
+            }
+            ExprKind::FStr(parts) => {
+                for p in parts {
+                    if let FStrPart::Expr(e) = p {
+                        take!(e);
+                    }
+                }
+            }
+            ExprKind::Call { callee, args } => {
+                take_box!(callee);
+                for a in args {
+                    take!(a);
+                }
+            }
+            ExprKind::Index { obj, idx } => {
+                take_box!(obj);
+                take_box!(idx);
+            }
+            ExprKind::Slice { obj, start, end, step } => {
+                take_box!(obj);
+                take_opt!(start);
+                take_opt!(end);
+                take_opt!(step);
+            }
+            ExprKind::Range { start, end, .. } => {
+                take_box!(start);
+                take_box!(end);
+            }
+            ExprKind::Array(items) => {
+                for a in items {
+                    take!(a);
+                }
+            }
+            ExprKind::Map(pairs) => {
+                for (k, v) in pairs {
+                    take!(k);
+                    take!(v);
+                }
+            }
+            // Func bodies are Vec<Stmt>; statement nesting is capped by the
+            // parser's MAX_DEPTH, so their drop glue is safe.
+            ExprKind::Func(_)
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Null
+            | ExprKind::Ident(_)
+            | ExprKind::Super(_) => {}
+        }
+    }
+}
+
+impl Drop for Expr {
+    fn drop(&mut self) {
+        // Tear the tree down with an explicit work stack: the default
+        // recursive drop glue overflowed on deep spines (26.0.12.11).
+        let mut work = Vec::new();
+        self.drain_children(&mut work);
+        while let Some(mut e) = work.pop() {
+            e.drain_children(&mut work);
+            // e drops here; its own Drop finds only leaf children left.
+        }
+    }
 }
 
 /// A statement node.

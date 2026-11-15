@@ -896,7 +896,13 @@ impl Parser {
 
     fn to_target(&self, expr: Expr, op_tok: &Token) -> PResult<Target> {
         let (eline, ecol) = (expr.line, expr.col);
-        match expr.kind {
+        // Take the kind out (Expr implements Drop, so it cannot be
+        // destructured by value): the husk drops as a cheap leaf.
+        let kind = std::mem::replace(
+            &mut { expr }.kind,
+            ExprKind::Null,
+        );
+        match kind {
             ExprKind::Ident(name) => Ok(Target::Ident { name, line: eline, col: ecol }),
             ExprKind::Index { obj, idx } => Ok(Target::Index { obj: *obj, idx: *idx }),
             _ => Err(RscpError::parse(
@@ -1151,7 +1157,10 @@ impl Parser {
         };
         if let Some(op) = op {
             let tok = self.advance();
-            let expr = self.unary()?;
+            self.enter()?; // `!!!!!…` chains recurse and used to overflow
+            let expr = self.unary();
+            self.leave();
+            let expr = expr?;
             Ok(Expr::new(
                 ExprKind::Unary { op, expr: Box::new(expr) },
                 tok.line,
@@ -1167,7 +1176,10 @@ impl Parser {
     fn power(&mut self) -> PResult<Expr> {
         let base = self.postfix()?;
         if let Some(op) = self.match_ty(TokenType::StarStar) {
-            let rhs = self.unary()?; // allows `-x` and chained `**`
+            self.enter()?; // `2**2**2…` recurses and used to overflow
+            let rhs = self.unary();
+            self.leave();
+            let rhs = rhs?; // allows `-x` and chained `**`
             return Ok(Expr::new(
                 ExprKind::Binary { op: BinaryOp::Pow, lhs: Box::new(base), rhs: Box::new(rhs) },
                 op.line,
