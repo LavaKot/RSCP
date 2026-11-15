@@ -1,82 +1,146 @@
 {
   "let binding": {
     "prefix": "let",
-    "body": ["let ${1:name} = ${2:value}"],
+    "body": [
+      "let ${1:name} = ${2:value}"
+    ],
     "description": "Immutable binding"
   },
   "var binding": {
     "prefix": "var",
-    "body": ["var ${1:name} = ${2:value}"],
+    "body": [
+      "var ${1:name} = ${2:value}"
+    ],
     "description": "Mutable binding"
   },
   "function": {
     "prefix": "fn",
-    "body": ["fn ${1:name}(${2:params}) {", "\t$0", "}"],
+    "body": [
+      "fn ${1:name}(${2:params}) {",
+      "\t$0",
+      "}"
+    ],
     "description": "Function with a block body"
   },
   "arrow function": {
     "prefix": "fna",
-    "body": ["fn ${1:name}(${2:params}) -> ${3:expression}"],
+    "body": [
+      "fn ${1:name}(${2:params}) -> ${3:expression}"
+    ],
     "description": "Function with an arrow body (implicit return)"
   },
   "short closure": {
     "prefix": "cl",
-    "body": ["|${1:params}| ${2:expression}"],
+    "body": [
+      "|${1:params}| ${2:expression}"
+    ],
     "description": "Short closure with implicit return"
   },
   "if": {
     "prefix": "if",
-    "body": ["if ${1:condition} {", "\t$0", "}"],
+    "body": [
+      "if ${1:condition} {",
+      "\t$0",
+      "}"
+    ],
     "description": "If (no parentheses needed)"
   },
   "if else": {
     "prefix": "ife",
-    "body": ["if ${1:condition} {", "\t$2", "} else {", "\t$0", "}"],
+    "body": [
+      "if ${1:condition} {",
+      "\t$2",
+      "} else {",
+      "\t$0",
+      "}"
+    ],
     "description": "If / else"
   },
   "while": {
     "prefix": "while",
-    "body": ["while ${1:condition} {", "\t$0", "}"],
+    "body": [
+      "while ${1:condition} {",
+      "\t$0",
+      "}"
+    ],
     "description": "While loop (no parentheses needed)"
   },
   "loop": {
     "prefix": "loop",
-    "body": ["loop {", "\t$0", "}"],
+    "body": [
+      "loop {",
+      "\t$0",
+      "}"
+    ],
     "description": "Infinite loop"
   },
   "for over range": {
     "prefix": "forr",
-    "body": ["for ${1:i} in ${2:0}..${3:n} {", "\t$0", "}"],
+    "body": [
+      "for ${1:i} in ${2:0}..${3:n} {",
+      "\t$0",
+      "}"
+    ],
     "description": "For over an exclusive range"
   },
   "for over range inclusive": {
     "prefix": "forri",
-    "body": ["for ${1:i} in ${2:0}..=${3:n} {", "\t$0", "}"],
+    "body": [
+      "for ${1:i} in ${2:0}..=${3:n} {",
+      "\t$0",
+      "}"
+    ],
     "description": "For over an inclusive range"
   },
   "for in collection": {
     "prefix": "forin",
-    "body": ["for ${1:item} in ${2:collection} {", "\t$0", "}"],
+    "body": [
+      "for ${1:item} in ${2:collection} {",
+      "\t$0",
+      "}"
+    ],
     "description": "For over an array or map keys"
   },
   "c-style for (legacy)": {
     "prefix": "forc",
-    "body": ["for (var ${1:i} = ${2:0}; ${3:i} < ${4:n}; ${1:i}++) {", "\t$0", "}"],
+    "body": [
+      "for (var ${1:i} = ${2:0}; ${3:i} < ${4:n}; ${1:i}++) {",
+      "\t$0",
+      "}"
+    ],
     "description": "Legacy C-style for with parentheses"
   },
   "ternary": {
     "prefix": "tern",
-    "body": ["${1:cond} ? ${2:then} : ${3:else}"],
+    "body": [
+      "${1:cond} ? ${2:then} : ${3:else}"
+    ],
     "description": "Ternary expression"
   },
   "println": {
     "prefix": "pl",
-    "body": ["println($0)"],
+    "body": [
+      "println($0)"
+    ],
     "description": "Print with a newline"
   },
   "main": {
     "prefix": "main",
-    "body": ["fn main() {", "\t$0", "}"],
+    "body": [
+      "fn main() {",
+      "\t$0",
+      "}"
+    ],
     "description": "Program entry point"
+  },
+  "match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "    ${2:pattern} => ${3:expr},",
+      "    else => ${4:expr}",
+      "}"
+    ],
+    "description": "match expression"
   }
 }

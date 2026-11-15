@@ -461,6 +461,11 @@ impl Parser {
                 StarAssign => AssignOp::MulSet,
                 SlashAssign => AssignOp::DivSet,
                 PercentAssign => AssignOp::ModSet,
+                AmpAssign => AssignOp::BitAndSet,
+                PipeAssign => AssignOp::BitOrSet,
+                CaretAssign => AssignOp::BitXorSet,
+                ShlAssign => AssignOp::ShlSet,
+                ShrAssign => AssignOp::ShrSet,
                 _ => unreachable!(),
             };
             if want_semi {
@@ -495,7 +500,19 @@ impl Parser {
 
     fn match_assign_op(&mut self) -> Option<Token> {
         use TokenType::*;
-        for ty in [Assign, PlusAssign, MinusAssign, StarAssign, SlashAssign, PercentAssign] {
+        for ty in [
+            Assign,
+            PlusAssign,
+            MinusAssign,
+            StarAssign,
+            SlashAssign,
+            PercentAssign,
+            AmpAssign,
+            PipeAssign,
+            CaretAssign,
+            ShlAssign,
+            ShrAssign,
+        ] {
             if let Some(t) = self.match_ty(ty) {
                 return Some(t);
             }
@@ -603,6 +620,48 @@ impl Parser {
         Ok(lhs)
     }
 
+    /// `a | b` — bitwise or. A single `|` only reaches here in infix
+    /// position; in prefix position it opens a short closure. Like Rust,
+    /// `&`, `^`, `|` bind tighter than comparisons and looser than shifts.
+    fn bit_or(&mut self) -> PResult<Expr> {
+        let mut lhs = self.bit_xor()?;
+        while let Some(op) = self.match_ty(TokenType::Pipe) {
+            let rhs = self.bit_xor()?;
+            lhs = Expr::new(
+                ExprKind::Binary { op: BinaryOp::BitOr, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                op.line,
+                op.col,
+            );
+        }
+        Ok(lhs)
+    }
+
+    fn bit_xor(&mut self) -> PResult<Expr> {
+        let mut lhs = self.bit_and()?;
+        while let Some(op) = self.match_ty(TokenType::Caret) {
+            let rhs = self.bit_and()?;
+            lhs = Expr::new(
+                ExprKind::Binary { op: BinaryOp::BitXor, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                op.line,
+                op.col,
+            );
+        }
+        Ok(lhs)
+    }
+
+    fn bit_and(&mut self) -> PResult<Expr> {
+        let mut lhs = self.shift()?;
+        while let Some(op) = self.match_ty(TokenType::Amp) {
+            let rhs = self.shift()?;
+            lhs = Expr::new(
+                ExprKind::Binary { op: BinaryOp::BitAnd, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                op.line,
+                op.col,
+            );
+        }
+        Ok(lhs)
+    }
+
     fn equality(&mut self) -> PResult<Expr> {
         let mut lhs = self.comparison()?;
         loop {
@@ -622,13 +681,31 @@ impl Parser {
     }
 
     fn comparison(&mut self) -> PResult<Expr> {
-        let mut lhs = self.term()?;
+        let mut lhs = self.bit_or()?;
         loop {
             let op = match self.peek_ty() {
                 TokenType::Lt => BinaryOp::Lt,
                 TokenType::Le => BinaryOp::Le,
                 TokenType::Gt => BinaryOp::Gt,
                 TokenType::Ge => BinaryOp::Ge,
+                _ => return Ok(lhs),
+            };
+            let tok = self.advance();
+            let rhs = self.bit_or()?;
+            lhs = Expr::new(
+                ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                tok.line,
+                tok.col,
+            );
+        }
+    }
+
+    fn shift(&mut self) -> PResult<Expr> {
+        let mut lhs = self.term()?;
+        loop {
+            let op = match self.peek_ty() {
+                TokenType::Shl => BinaryOp::Shl,
+                TokenType::Shr => BinaryOp::Shr,
                 _ => return Ok(lhs),
             };
             let tok = self.advance();
@@ -682,6 +759,7 @@ impl Parser {
         let op = match self.peek_ty() {
             TokenType::Not => Some(UnaryOp::Not),
             TokenType::Minus => Some(UnaryOp::Neg),
+            TokenType::Tilde => Some(UnaryOp::BitNot),
             _ => None,
         };
         if let Some(op) = op {
@@ -838,8 +916,159 @@ impl Parser {
             // Short closures: `|x| expr`, `|x, y| expr`, `|x| { ... }`, `|| expr`.
             Pipe => self.short_closure(),
             OrOr => self.short_closure(),
+            // `match value { arms }` — an expression.
+            Match => {
+                self.advance();
+                self.match_expression()
+            }
             _ => Err(self.error_here(format!(
                 "unexpected {} in an expression",
+                tok.ty.describe()
+            ))),
+        }
+    }
+
+    /// `match value { pattern (| pattern)* [if cond] => body, ... }`.
+    /// The `{` must stay on the same line as the matched value.
+    fn match_expression(&mut self) -> PResult<Expr> {
+        let value = self.expression()?;
+        if !self.check(TokenType::LBrace) {
+            return Err(self.error_here(
+                "'{' to open the match body (braces are required, and the '{' belongs on the same line as the value)",
+            ));
+        }
+        self.advance(); // {
+        let mut arms: Vec<MatchArm> = Vec::new();
+        loop {
+            if self.check(TokenType::RBrace) {
+                break; // trailing comma before the closing brace
+            }
+            if self.at_eof() {
+                return Err(self.error_here("unterminated match: expected '}'"));
+            }
+            // pattern (| pattern)*
+            let mut patterns = vec![self.pattern()?];
+            while self.match_ty(TokenType::Pipe).is_some() {
+                patterns.push(self.pattern()?);
+            }
+            if patterns.len() > 1 {
+                for p in &patterns {
+                    if matches!(p, Pattern::Binding(_) | Pattern::Wildcard) {
+                        return Err(self.error_here(
+                            "a binding or catch-all pattern cannot be combined with '|'",
+                        ));
+                    }
+                }
+            }
+            let guard = if self.match_ty(TokenType::If).is_some() {
+                Some(self.expression()?)
+            } else {
+                None
+            };
+            self.expect(TokenType::FatArrow, "'=>' after the match pattern")?;
+            let body = if self.check(TokenType::LBrace) {
+                MatchBody::Block(self.block()?)
+            } else {
+                MatchBody::Expr(self.expression()?)
+            };
+            arms.push(MatchArm { patterns, guard, body });
+            // Arms are separated by a comma, or simply by a newline
+            // (Rust-style): a block-bodied arm ends with '}', so semicolon
+            // insertion may add a ';' before the next arm — skip those.
+            while self.match_ty(TokenType::Semicolon).is_some() {}
+            if self.match_ty(TokenType::Comma).is_none() && self.check(TokenType::RBrace) {
+                break;
+            }
+        }
+        self.expect(TokenType::RBrace, "'}' after the match arms")?;
+        if arms.is_empty() {
+            return Err(self.error_here("a match needs at least one arm"));
+        }
+        // A catch-all or unguarded binding in a non-last arm would make every
+        // later arm unreachable (Rust-style rule; with a guard it is fine).
+        for arm in &arms[..arms.len() - 1] {
+            let catches_all =
+                arm.patterns.iter().any(|p| matches!(p, Pattern::Binding(_) | Pattern::Wildcard));
+            if catches_all && arm.guard.is_none() {
+                return Err(self.error_here(
+                    "a binding or catch-all pattern is only allowed in the last arm of the match (add an 'if' guard or move it last)",
+                ));
+            }
+        }
+        let tok = self.peek().clone();
+        Ok(Expr::new(
+            ExprKind::Match { value: Box::new(value), arms },
+            tok.line,
+            tok.col,
+        ))
+    }
+
+    /// One match pattern: a literal, a range, a binding or a catch-all.
+    fn pattern(&mut self) -> PResult<Pattern> {
+        use TokenType::*;
+        let tok = self.peek().clone();
+        match tok.ty {
+            Int => {
+                self.advance();
+                let lo = match tok.lit {
+                    Some(Lit::Int(i)) => i,
+                    _ => unreachable!(),
+                };
+                if matches!(self.peek_ty(), DotDot | DotDotEq) {
+                    let range_tok = self.advance();
+                    let end = self.expect(Int, "an integer as the range end")?;
+                    let hi = match end.lit {
+                        Some(Lit::Int(i)) => i,
+                        _ => unreachable!(),
+                    };
+                    return Ok(Pattern::Range {
+                        lo,
+                        hi,
+                        inclusive: range_tok.ty == DotDotEq,
+                    });
+                }
+                Ok(Pattern::Int(lo))
+            }
+            Float => {
+                self.advance();
+                match tok.lit {
+                    Some(Lit::Float(f)) => Ok(Pattern::Float(f)),
+                    _ => unreachable!(),
+                }
+            }
+            Str => {
+                self.advance();
+                match tok.lit {
+                    Some(Lit::Str(s)) => Ok(Pattern::Str(s)),
+                    _ => unreachable!(),
+                }
+            }
+            True => {
+                self.advance();
+                Ok(Pattern::Bool(true))
+            }
+            False => {
+                self.advance();
+                Ok(Pattern::Bool(false))
+            }
+            Null => {
+                self.advance();
+                Ok(Pattern::Null)
+            }
+            Else => {
+                self.advance();
+                Ok(Pattern::Wildcard)
+            }
+            Ident => {
+                self.advance();
+                if tok.lexeme == "_" {
+                    Ok(Pattern::Wildcard)
+                } else {
+                    Ok(Pattern::Binding(tok.lexeme.clone()))
+                }
+            }
+            _ => Err(self.error_here(format!(
+                "expected a match pattern (a literal, a range, a name, '_' or 'else'), found {}",
                 tok.ty.describe()
             ))),
         }
@@ -1087,6 +1316,94 @@ fn f(
             }
             _ => panic!("bad stmt"),
         }
+    }
+
+    #[test]
+    fn bitwise_precedence_and_ops() {
+        // `&` binds tighter than `==`; `|` looser than `&`; `&&` looser
+        // than `|`; `<<` tighter than comparison, looser than `+`.
+        let stmts = parse(
+            "let a = 1 & 2 == 4\nlet b = 1 | 2 & 3\nlet c = 1 << 2 + 3\nlet d = 1 | 2 == 3 && true\nlet e = ~5 & 0xFF",
+        );
+        let init = |i: usize| match &stmts[i].kind {
+            StmtKind::Let { init, .. } => init.kind.clone(),
+            other => panic!("bad stmt: {other:?}"),
+        };
+        assert!(matches!(init(0), ExprKind::Binary { op: BinaryOp::Eq, ref lhs, .. }
+            if matches!(lhs.kind, ExprKind::Binary { op: BinaryOp::BitAnd, .. })));
+        assert!(matches!(init(1), ExprKind::Binary { op: BinaryOp::BitOr, ref rhs, .. }
+            if matches!(rhs.kind, ExprKind::Binary { op: BinaryOp::BitAnd, .. })));
+        assert!(matches!(init(2), ExprKind::Binary { op: BinaryOp::Shl, ref rhs, .. }
+            if matches!(rhs.kind, ExprKind::Binary { op: BinaryOp::Add, .. })));
+        assert!(matches!(init(3), ExprKind::Logical { op: LogicalOp::And, ref lhs, .. }
+            if matches!(lhs.kind, ExprKind::Binary { op: BinaryOp::Eq, lhs: ref l2, .. }
+                if matches!(l2.kind, ExprKind::Binary { op: BinaryOp::BitOr, .. }))));
+        assert!(matches!(init(4), ExprKind::Binary { op: BinaryOp::BitAnd, ref lhs, .. }
+            if matches!(lhs.kind, ExprKind::Unary { op: UnaryOp::BitNot, .. })));
+        // Compound bitwise assignment parses.
+        let stmts = parse("var x = 1\nx &= 3\nx |= 8\nx ^= 1\nx <<= 2\nx >>= 1");
+        for i in 1..6 {
+            assert!(matches!(&stmts[i].kind, StmtKind::Assign { .. }), "stmt {i}");
+        }
+    }
+
+    #[test]
+    fn match_shapes() {
+        let stmts = parse(
+            "let x = match n { 0 => \"zero\", 1 | 2 => \"few\", k if k < 0 => \"neg\", 3..=9 => \"digit\", else => \"other\" }",
+        );
+        match &stmts[0].kind {
+            StmtKind::Let { init, .. } => match &init.kind {
+                ExprKind::Match { arms, .. } => {
+                    assert_eq!(arms.len(), 5);
+                    assert!(matches!(&arms[0].patterns[0], Pattern::Int(0)));
+                    assert_eq!(arms[1].patterns.len(), 2);
+                    assert!(matches!(&arms[1].patterns[1], Pattern::Int(2)));
+                    assert!(arms[2].guard.is_some());
+                    assert!(matches!(&arms[2].patterns[0], Pattern::Binding(k) if k == "k"));
+                    assert!(matches!(
+                        &arms[3].patterns[0],
+                        Pattern::Range { lo: 3, hi: 9, inclusive: true }
+                    ));
+                    assert!(matches!(&arms[4].patterns[0], Pattern::Wildcard));
+                    assert!(matches!(&arms[0].body, MatchBody::Expr(_)));
+                }
+                other => panic!("bad expr: {other:?}"),
+            },
+            other => panic!("bad stmt: {other:?}"),
+        }
+        // Exclusive range, `_` catch-all, block body, match as a statement.
+        let stmts = parse("match x { 0..9 => \"low\", _ => { let y = 1\n y * 2 } }");
+        match &stmts[0].kind {
+            StmtKind::Expr(e) => match &e.kind {
+                ExprKind::Match { arms, .. } => {
+                    assert!(matches!(
+                        &arms[0].patterns[0],
+                        Pattern::Range { lo: 0, hi: 9, inclusive: false }
+                    ));
+                    assert!(matches!(&arms[1].body, MatchBody::Block(_)));
+                }
+                other => panic!("bad expr: {other:?}"),
+            },
+            other => panic!("bad stmt: {other:?}"),
+        }
+        // A binding with a guard is legal in a non-last arm.
+        assert_eq!(parse("match x { n if n < 0 => 1, _ => 2 }").len(), 1);
+    }
+
+    #[test]
+    fn match_errors() {
+        // Catch-all not last -> unreachable arms.
+        assert!(matches!(parse_err("match x { _ => 1, 2 => 2 }"), RscpError::Parse { .. }));
+        // Binding without a guard not last.
+        assert!(matches!(parse_err("match x { n => 1, 2 => 2 }"), RscpError::Parse { .. }));
+        // A binding cannot be combined with '|'.
+        assert!(matches!(parse_err("match x { 1 | n => 1, _ => 2 }"), RscpError::Parse { .. }));
+        // Missing '=>' or arms.
+        assert!(matches!(parse_err("match x { 1 : 2 }"), RscpError::Parse { .. }));
+        assert!(matches!(parse_err("match x { }"), RscpError::Parse { .. }));
+        // A bad pattern.
+        assert!(matches!(parse_err("match x { (1) => 2 }"), RscpError::Parse { .. }));
     }
 
     #[test]

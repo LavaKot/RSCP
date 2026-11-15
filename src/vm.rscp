@@ -489,6 +489,39 @@ impl Vm {
                             )),
                         }
                     }
+                    Op::PopNUnder => {
+                        // Pop n cells from under the top value (match keeps
+                        // its result while dropping hidden slots).
+                        let n = chunk.code[ip] as usize;
+                        ip += 1;
+                        if self.stack.len() < base + n + 1 {
+                            rt!(op_ip, "internal error: stack underflow in PopNUnder");
+                        }
+                        let top = self.stack.pop().unwrap();
+                        let new_len = self.stack.len() - n;
+                        // No upvalue can target the hidden match slots.
+                        self.stack.truncate(new_len);
+                        self.stack.push(top);
+                    }
+                    Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => {
+                        let rhs = self.stack.pop().unwrap();
+                        let lhs = self.stack.pop().unwrap();
+                        match bitwise(op, lhs, rhs) {
+                            Ok(v) => self.stack.push(v),
+                            Err(msg) => rt!(op_ip, msg),
+                        }
+                    }
+                    Op::BitNot => {
+                        let v = self.stack.pop().unwrap();
+                        match v {
+                            Value::Int(i) => self.stack.push(Value::Int(!i)),
+                            Value::Bool(b) => self.stack.push(Value::Bool(!b)),
+                            other => rt!(op_ip, format!(
+                                "the operand of '~' must be int or bool, got {}",
+                                other.type_name()
+                            )),
+                        }
+                    }
                 }
             }
         }
@@ -630,6 +663,45 @@ fn arith(op: Op, lhs: Value, rhs: Value) -> Result<Value, String> {
         }
         (a, b) => Err(format!(
             "unsupported operand types for '{symbol}': {} and {}",
+            a.type_name(),
+            b.type_name()
+        )),
+    }
+}
+
+/// Bitwise ops: two ints (`& | ^ << >>`, shift amounts clamped-checked to
+/// 0..64), or two bools for `& | ^`. Any other combination is an error.
+fn bitwise(op: Op, lhs: Value, rhs: Value) -> Result<Value, String> {
+    let symbol = match op {
+        Op::BitAnd => "&",
+        Op::BitOr => "|",
+        Op::BitXor => "^",
+        Op::Shl => "<<",
+        _ => ">>",
+    };
+    match (lhs, rhs) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(match op {
+            Op::BitAnd => a & b,
+            Op::BitOr => a | b,
+            Op::BitXor => a ^ b,
+            Op::Shl | Op::Shr => {
+                if b < 0 || b >= 64 {
+                    return Err(format!("shift amount must be in 0..64, got {b}"));
+                }
+                let amt = b as u32;
+                if op == Op::Shl { a << amt } else { a >> amt }
+            }
+            _ => unreachable!(),
+        })),
+        (Value::Bool(a), Value::Bool(b)) if !matches!(op, Op::Shl | Op::Shr) => {
+            Ok(Value::Bool(match op {
+                Op::BitAnd => a & b,
+                Op::BitOr => a | b,
+                _ => a ^ b,
+            }))
+        }
+        (a, b) => Err(format!(
+            "bitwise '{symbol}' needs two ints (or two bools for & | ^), got {} and {}",
             a.type_name(),
             b.type_name()
         )),
@@ -833,5 +905,96 @@ mod tests {
         assert!(matches!(global(&vm, "a"), Value::Int(1)));
         assert!(matches!(global(&vm, "b"), Value::Bool(true)));
         assert!(matches!(global(&vm, "c"), Value::Bool(false)));
+    }
+
+    #[test]
+    fn bitwise_ops() {
+        let vm = run(
+            "var a = 0b1100 & 0xA; var b = 0x0F | 0x30; var c = 0xFF ^ 0x0F; \
+             var d = 1 << 10; var e = -16 >> 2; var f = ~0; \
+             var g = true & false; var h = true | false; var i = true ^ true; var j = ~true;",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "a"), Value::Int(8)));
+        assert!(matches!(global(&vm, "b"), Value::Int(63)));
+        assert!(matches!(global(&vm, "c"), Value::Int(240)));
+        assert!(matches!(global(&vm, "d"), Value::Int(1024)));
+        assert!(matches!(global(&vm, "e"), Value::Int(-4)));
+        assert!(matches!(global(&vm, "f"), Value::Int(-1)));
+        assert!(matches!(global(&vm, "g"), Value::Bool(false)));
+        assert!(matches!(global(&vm, "h"), Value::Bool(true)));
+        assert!(matches!(global(&vm, "i"), Value::Bool(false)));
+        assert!(matches!(global(&vm, "j"), Value::Bool(false)));
+        // Compound bitwise assignment: 10 &15 |1 ^3 <<2 >>1 = 16.
+        let vm = run("var x = 0b1010; x &= 0x0F; x |= 1; x ^= 3; x <<= 2; x >>= 1;").unwrap();
+        assert!(matches!(global(&vm, "x"), Value::Int(16)));
+    }
+
+    #[test]
+    fn bitwise_errors() {
+        for (src, needle) in [
+            ("var x = 1 << 64;", "shift amount"),
+            ("var x = 1 >> -1;", "shift amount"),
+            ("var x = 1 & 1.5;", "bitwise"),
+            ("var x = 1 | \"s\";", "bitwise"),
+            ("var x = ~1.5;", "'~'"),
+        ] {
+            let err = match run(src) {
+                Err(e) => e,
+                Ok(_) => panic!("expected a runtime error for: {src}"),
+            };
+            let msg = format!("{err}");
+            assert!(msg.contains(needle), "for {src}: got {msg}");
+        }
+    }
+
+    #[test]
+    fn match_expressions() {
+        let vm = run(
+            "fn name(n) -> match n { 0 => \"zero\", 1 | 2 => \"few\", k if k < 0 => \"neg\", 3..=9 => \"digit\", else => \"many\" };\
+             var a = name(0); var b = name(2); var c = name(-5); var d = name(7); var e = name(42);",
+        )
+        .unwrap();
+        let s = |n: &str| match global(&vm, n) {
+            Value::Str(s) => s.to_string(),
+            other => panic!("bad {n}: {other:?}"),
+        };
+        assert_eq!(s("a"), "zero");
+        assert_eq!(s("b"), "few");
+        assert_eq!(s("c"), "neg");
+        assert_eq!(s("d"), "digit");
+        assert_eq!(s("e"), "many");
+        // Exclusive range, block body with an implicit value, binding.
+        let vm = run("let x = match 5 { 0..5 => \"low\", n => { var t = n * 2; t + 1 } };").unwrap();
+        assert!(matches!(global(&vm, "x"), Value::Int(11)));
+        // Strings, bools and null as scrutinees; match as a statement.
+        let vm = run(
+            "var out = \"\";\
+             match \"b\" { \"a\" => { out = \"A\" }, \"b\" => { out = \"B\" }, else => { out = \"?\" } };\
+             match true { false => { out = \"f\" }, _ => { out = out + \"!\" } };\
+             match null { 1 => { out = \"1\" }, else => { out = out + \"n\" } };",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "out"), Value::Str(ref s) if &**s == "B!n"));
+    }
+
+    #[test]
+    fn match_runtime_errors() {
+        for (src, needle) in [
+            ("var x = match 5 { 1 => \"one\", 2 => \"two\" };", "no arm matched"),
+            ("var x = match 1.5 { 1 => \"one\", else => \"x\" };", ""), // int/float equality
+        ] {
+            if needle.is_empty() {
+                let vm = run(src).unwrap();
+                assert!(matches!(global(&vm, "x"), Value::Str(ref s) if &**s == "x"));
+                continue;
+            }
+            let err = match run(src) {
+                Err(e) => e,
+                Ok(_) => panic!("expected a runtime error for: {src}"),
+            };
+            let msg = format!("{err}");
+            assert!(msg.contains(needle), "for {src}: got {msg}");
+        }
     }
 }

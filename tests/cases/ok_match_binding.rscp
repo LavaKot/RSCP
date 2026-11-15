@@ -1,0 +1,20 @@
+// A binding names the matched value; a block body's last expression is
+// the arm's value. match works inside loops and larger expressions.
+let x = match 5 {
+    0..5 => "low",
+    n => {
+        var t = n * 2
+        t + 1
+    }
+}
+println(x)
+
+var total = 0
+for i in [3, 8, 15] {
+    total += match i % 3 {
+        0 => 10,
+        1 => 20,
+        else => 30,
+    }
+}
+println(total)

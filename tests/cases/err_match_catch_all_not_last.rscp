@@ -1,0 +1,3 @@
+// The catch-all must be the last arm; later arms would be unreachable.
+let x = match 1 { _ => 0, 2 => 2 }
+println(x)

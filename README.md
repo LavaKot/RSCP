@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.2.1.1 — enter statements, Ctrl-D to exit.
+rscp 2026.3.0.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.2.1.1.vsix`
+  `code --install-extension editors/vscode/rscp-2026.3.0.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -286,6 +286,44 @@ A range's end binds tightly: `for i in 0..n - 1` iterates `0..(n-1)`.
 Ranges exist only as the iterable of a `for` loop — `let r = 0..5;` is a
 compile error.
 
+### Pattern matching: `match`
+
+`match` is an **expression**: the value of the whole thing is the value of
+the first arm that matches. Patterns are literals, alternations, integer
+ranges, guards (`if`), and bindings that name the matched value. `_` or
+`else` is the catch-all and must come last.
+
+```rust
+fn describe(n) -> match n {
+    0 => "zero",
+    1 | 2 => "one or two",       // alternation
+    k if k < 0 => "negative",    // guard over the binding k
+    3..=9 => "a digit",          // inclusive range (3..9 is exclusive)
+    else => "many"               // catch-all: also spelled _
+}
+
+var size = match len(items) { 0 => "empty", 1..=5 => "small", _ => "big" }
+```
+
+An arm body is an expression, or a `{ }` block whose **last expression
+statement is the arm's value** — handy for multi-step arms:
+
+```rust
+var label = match user {
+    "admin" => "root",
+    name => {
+        let display = upper(name)
+        "user: " + display
+    }
+}
+```
+
+Rules kept from Rust: a binding or catch-all only makes sense in the last
+arm (earlier arms need an `if` guard, or the compiler rejects the match as
+unreachable), and if nothing matches at runtime the match raises a
+catchable `match: no arm matched the value` error. `break`/`continue`/`return`
+inside an arm body do what they'd do in the enclosing loop or function.
+
 ### Functions and closures
 
 ```rust
@@ -328,22 +366,33 @@ fn main() { println("then main()") }
 | Precedence (high → low) | Operators                                  |
 |-------------------------|--------------------------------------------|
 | 1                       | `()` call, `[]` index                      |
-| 2                       | unary `! -`                                |
+| 2                       | unary `! - ~`                              |
 | 3                       | `* / %`                                    |
 | 4                       | `+ -` (`+` also concatenates strings/arrays)|
-| 5                       | `< <= > >=`                                |
-| 6                       | `== !=`                                    |
-| 7                       | `&&`                                       |
-| 8                       | `\|\|`                                     |
-| 9                       | `..`, `..=` (ranges, `for` iterables only)  |
-| 10                      | `? :` (right-associative)                  |
+| 5                       | `<< >>`                                    |
+| 6                       | `&`                                        |
+| 7                       | `^`                                        |
+| 8                       | `\|`                                       |
+| 9                       | `< <= > >=`                                |
+| 10                      | `== !=`                                    |
+| 11                      | `&&`                                       |
+| 12                      | `\|\|`                                     |
+| 13                      | `..`, `..=` (ranges, `for` iterables only)  |
+| 14                      | `? :` (right-associative)                  |
 
-Assignment (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `++`, `--`) is a *statement*,
-not an expression — no `if (x = 0)` accidents. `==` compares numbers,
-strings, bools and `null` by value (`1 == 1.0` is `true`); arrays, maps and
-functions compare by identity. `&&`/`||` short-circuit and require bool
-operands; so do `if`/`while` conditions. Integer overflow and division by
-zero are runtime errors, not UB.
+Like Rust, the bitwise operators bind *tighter* than comparisons
+(`a & mask == 0` means `(a & mask) == 0`) — the opposite of C's infamous
+precedence trap. `&`, `|`, `^` work on two ints or two bools; `~` inverts
+an int or a bool; shifts require the amount in `0..64`. Integer literals
+come in four bases: `42`, `0x2A`, `0b101010`, `0o52` (with `_` separators).
+
+Assignment (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`,
+`>>=`, `++`, `--`) is a *statement*, not an expression — no `if (x = 0)`
+accidents. `==` compares numbers, strings, bools and `null` by value
+(`1 == 1.0` is `true`); arrays, maps and functions compare by identity.
+`&&`/`||` short-circuit and require bool operands; so do `if`/`while`
+conditions. Integer overflow and division by zero are runtime errors,
+not UB.
 
 ### Built-in functions
 
@@ -362,6 +411,7 @@ zero are runtime errors, not UB.
 | `keys(map)` | **sorted** array of keys (deterministic iteration) |
 | `has(map, key)` | key-presence test |
 | `assert(cond, msg?)` | runtime error if `cond` is false |
+| `panic(msg?)` | abort with a message (catchable, see the Changelog) |
 
 ### Strings
 
@@ -413,17 +463,26 @@ expression     := ternary ;
 ternary        := range [ "?" expression ":" ternary ] ;
 range          := logicOr [ ( ".." | "..=" ) logicOr ] ; (* for iterables only *)
 logicOr        := logicAnd { "||" logicAnd } ;
-logicAnd       := equality { "&&" equality } ;
+logicAnd       := bitOr { "&&" bitOr } ;
+bitOr          := bitXor { "|" bitXor } ;
+bitXor         := bitAnd { "^" bitAnd } ;
+bitAnd         := equality { "&" equality } ;
 equality       := comparison { ( "==" | "!=" ) comparison } ;
-comparison     := term { ( "<" | "<=" | ">" | ">=" ) term } ;
+comparison     := shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
+shift          := term { ( "<<" | ">>" ) term } ;
 term           := factor { ( "+" | "-" ) factor } ;
 factor         := unary { ( "*" | "/" | "%" ) unary } ;
-unary          := ( "!" | "-" ) unary | postfix ;
+unary          := ( "!" | "-" | "~" ) unary | postfix ;
 postfix        := primary { "(" [ arguments ] ")" | "[" expression "]" } ;
 arguments      := expression { "," expression } [ "," ] ;
 primary        := INT | FLOAT | STRING | "true" | "false" | "null" | IDENT
                 | "(" expression ")" | arrayLit | mapLit | "fn" funcBody
-                | closure ;
+                | matchExpr | closure ;
+matchExpr      := "match" expression "{" arm { ( "," | ";" )* arm } [ "," ] "}" ;
+arm            := pattern { "|" pattern } [ "if" expression ] "=>"
+                  ( expression | block ) ;
+pattern        := INT [ ( ".." | "..=" ) INT ] | FLOAT | STRING
+                | "true" | "false" | "null" | IDENT | "else" ;  (* "_" is IDENT *)
 closure        := ( "|" paramList "|" | "||" ) ( expression | block ) ;
 arrayLit       := "[" [ expression { "," expression } [ "," ] ] "]" ;
 mapLit         := "{" [ expression ":" expression { "," … } [ "," ] ] "}" ;
@@ -432,8 +491,8 @@ mapLit         := "{" [ expression ":" expression { "," … } [ "," ] ] "}" ;
 A `;` is inserted automatically after a newline (or the end of input) when
 the line ends with a value, `)`, `]`, `}`, `++`, `--`, `return`, `break` or
 `continue` — and the next token cannot continue an expression (a `}`, `]`,
-`)`, `,`, `:`, `?`, `else`, `->`, `..` suppresses the insertion). A `{` at
-statement position always starts a block; a map literal in that position
+`)`, `,`, `:`, `?`, `else`, `->`, `=>`, `..` suppresses the insertion). A `{`
+at statement position always starts a block; a map literal in that position
 must be parenthesized: `var m = {"a": 1};` works, a bare `{"a": 1}` does not
 (same rule as JavaScript).
 
@@ -499,9 +558,10 @@ source (.rscp) ──► lexer ──► parser ──► compiler ──► byt
 Design highlights:
 
 * **Bytecode, not tree-walking.** Programs compile once into a `Chunk` of
-  39 one-byte opcodes (with `u8`/`u16` operands); the VM is a tight dispatch
+  46 one-byte opcodes (with `u8`/`u16` operands); the VM is a tight dispatch
   loop over call frames. `for i in 0..n` compiles to a counted loop — no
-  array is built (same speed as the legacy C-style `for`).
+  array is built (same speed as the legacy C-style `for`), and `match`
+  compiles to a jump chain — no allocations.
 * **Proper closures.** Captured locals are shared *upvalue* cells that stay
   "open" (pointing into the stack) while the defining scope runs and close
   (copying the value out) when it returns — so two closures made in the same
@@ -533,14 +593,14 @@ Design highlights:
 cargo test
 ```
 
-* **44 unit tests** across lexer (including the semicolon-insertion rules),
+* **51 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **72 golden cases** in `tests/cases/`: each program's exact stdout is
+* **80 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
-* **6 showcase examples** are smoke-tested (`examples/`).
+* **7 showcase examples** are smoke-tested (`examples/`).
 * The CLI surface itself is tested (exit codes, subcommands).
 
 ---
@@ -557,6 +617,8 @@ cargo test
 | lambdas | `lambda x: x` | `\|x\| x` | `\|x\| x` |
 | loops | `for i in range(n)` | `for i in 0..n` | `for i in 0..n` |
 | infinite loop | `while True:` | `loop { }` | `loop { }` |
+| branching | `match` (3.10+) | `match` | `match` (expression, with guards and ranges) |
+| bitwise | `\| & ^ << >>` | `\| & ^ ! << >>` | `\| & ^ ~ << >>` (Rust precedence) |
 | types | dynamic | static, inferred | dynamic |
 | memory | GC | ownership | refcounted `Rc` values |
 | speed | interpreter | native code | bytecode VM (≈ C-style loop ≈ 180 ns/iteration) |
@@ -579,13 +641,25 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.2.1` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.2.1.1`), release
+(`2026.3.0` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.3.0.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.3.0.0** — pattern matching and bitwise operations.
+  `match` is a full expression: literal patterns, alternation (`1 | 2`),
+  integer ranges (`3..=9`), `if` guards, bindings (`k if k < 0 => …`),
+  block bodies (the last expression statement is the arm's value) and a
+  `_`/`else` catch-all. Bitwise operators `& | ^ ~ << >>` with Rust
+  precedence (tighter than comparisons), compound forms `&= |= ^= <<= >>=`,
+  `& | ^` also work on two bools, and integer literals in four bases
+  (`0x2A`, `0b101010`, `0o52`). New `panic(msg?)` builtin. Under the hood
+  the compiler now tracks stack depth, so a `match` works in any operand
+  position (`x += match … { … }`, as a call argument, inside loops with
+  `break`/`continue` jumping out of arm bodies). 51 unit tests, 80 golden
+  cases, new `examples/match.rscp`.
 * **2026.2.1.1** — patch: `rscp update` is now Windows-only by design and
   fails fast on Linux/macOS instead of hunting for a PowerShell that some
   machines happen to have; golden-test expectations are CRLF-normalized

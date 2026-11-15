@@ -30,7 +30,7 @@ fn continues_expression(ty: TokenType) -> bool {
     matches!(
         ty,
         RBrace | RBracket | RParen | Comma | Colon | Semicolon | Question | DotDot | DotDotEq
-            | Arrow | Else
+            | Arrow | FatArrow | Else
     )
 }
 
@@ -207,29 +207,47 @@ impl<'src> Lexer<'src> {
     fn number(&mut self) -> Result<Token, RscpError> {
         let (start, line, col) = (self.pos, self.line, self.col);
 
-        // Hexadecimal integers: 0x1F, 0X_ff
-        if self.peek() == Some('0')
-            && matches!(self.peek_second(), Some('x' | 'X'))
-        {
-            self.advance(); // 0
-            self.advance(); // x
-            let digits_start = self.pos;
-            while matches!(self.peek(), Some(c) if c.is_ascii_hexdigit() || c == '_') {
-                self.advance();
+        // Radix integers: 0x1F, 0b1010, 0o17 (case-insensitive prefix, `_` separators)
+        if self.peek() == Some('0') {
+            let (radix, name) = match self.peek_second() {
+                Some('x' | 'X') => (16, "hex"),
+                Some('b' | 'B') => (2, "binary"),
+                Some('o' | 'O') => (8, "octal"),
+                _ => (0, ""),
+            };
+            if radix != 0 {
+                self.advance(); // 0
+                self.advance(); // prefix
+                let digits_start = self.pos;
+                let valid = |c: char| c.is_digit(radix) || c == '_';
+                while matches!(self.peek(), Some(c) if valid(c)) {
+                    self.advance();
+                }
+                let digits: String = self.src[digits_start..self.pos]
+                    .chars()
+                    .filter(|&c| c != '_')
+                    .collect();
+                if digits.is_empty() {
+                    return Err(RscpError::lex(
+                        format!("invalid {name} literal: no digits after the prefix"),
+                        line,
+                        col,
+                    ));
+                }
+                if self.starts_identifier()
+                    || matches!(self.peek(), Some(c) if c.is_ascii_digit())
+                {
+                    return Err(RscpError::lex(
+                        format!("invalid characters after {name} literal"),
+                        self.line,
+                        self.col,
+                    ));
+                }
+                let value = i64::from_str_radix(&digits, radix).map_err(|_| {
+                    RscpError::lex(format!("{name} integer literal is too large"), line, col)
+                })?;
+                return Ok(self.tok(TokenType::Int, start, line, col, Some(Lit::Int(value))));
             }
-            let digits: String = self.src[digits_start..self.pos]
-                .chars()
-                .filter(|&c| c != '_')
-                .collect();
-            if digits.is_empty() {
-                return Err(RscpError::lex("invalid hex literal: no digits after '0x'", line, col));
-            }
-            if self.starts_identifier() {
-                return Err(RscpError::lex("invalid characters after hex literal", self.line, self.col));
-            }
-            let value = i64::from_str_radix(&digits, 16)
-                .map_err(|_| RscpError::lex("hex integer literal is too large", line, col))?;
-            return Ok(self.tok(TokenType::Int, start, line, col, Some(Lit::Int(value))));
         }
 
         let mut is_float = false;
@@ -446,10 +464,45 @@ impl<'src> Lexer<'src> {
                 }
                 _ => Percent,
             },
+            '&' => match second {
+                Some('&') => {
+                    self.advance();
+                    AndAnd
+                }
+                Some('=') => {
+                    self.advance();
+                    AmpAssign
+                }
+                _ => Amp,
+            },
+            '|' => match second {
+                Some('|') => {
+                    self.advance();
+                    OrOr
+                }
+                Some('=') => {
+                    self.advance();
+                    PipeAssign
+                }
+                // A single '|' opens the parameter list of a short closure.
+                _ => Pipe,
+            },
+            '^' => match second {
+                Some('=') => {
+                    self.advance();
+                    CaretAssign
+                }
+                _ => Caret,
+            },
+            '~' => Tilde,
             '=' => match second {
                 Some('=') => {
                     self.advance();
                     EqEq
+                }
+                Some('>') => {
+                    self.advance();
+                    FatArrow
                 }
                 _ => Assign,
             },
@@ -465,6 +518,15 @@ impl<'src> Lexer<'src> {
                     self.advance();
                     Le
                 }
+                Some('<') => {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        ShlAssign
+                    } else {
+                        Shl
+                    }
+                }
                 _ => Lt,
             },
             '>' => match second {
@@ -472,28 +534,16 @@ impl<'src> Lexer<'src> {
                     self.advance();
                     Ge
                 }
+                Some('>') => {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        ShrAssign
+                    } else {
+                        Shr
+                    }
+                }
                 _ => Gt,
-            },
-            '&' => match second {
-                Some('&') => {
-                    self.advance();
-                    AndAnd
-                }
-                _ => {
-                    return Err(RscpError::lex(
-                        "unexpected character '&' (did you mean '&&'?)",
-                        line,
-                        col,
-                    ))
-                }
-            },
-            '|' => match second {
-                Some('|') => {
-                    self.advance();
-                    OrOr
-                }
-                // A single '|' opens the parameter list of a short closure.
-                _ => Pipe,
             },
             other => {
                 return Err(RscpError::lex(
@@ -528,13 +578,13 @@ mod tests {
 
     #[test]
     fn keywords_and_idents() {
-        let ts = types("let var fn true false null while for in loop");
+        let ts = types("let var fn true false null while for in loop match");
         assert_eq!(
             ts,
-            vec![Let, Var, Fn, True, False, Null, While, For, In, Loop, Eof]
+            vec![Let, Var, Fn, True, False, Null, While, For, In, Loop, Match, Eof]
         );
-        let ts = types("letx for_ _if fn2 loopx");
-        assert_eq!(ts, vec![Ident, Ident, Ident, Ident, Ident, Eof]);
+        let ts = types("letx for_ _if fn2 loopx matchy");
+        assert_eq!(ts, vec![Ident, Ident, Ident, Ident, Ident, Ident, Eof]);
     }
 
     #[test]
@@ -549,7 +599,7 @@ mod tests {
 
     #[test]
     fn numbers() {
-        let ts = lex("42 1.5 .5 5. 1e3 1.5e-2 0x1F 0xFF_AA 1_000");
+        let ts = lex("42 1.5 .5 5. 1e3 1.5e-2 0x1F 0xFF_AA 1_000 0b101 0o17 0B_1010");
         let lits: Vec<String> = ts
             .iter()
             .filter(|t| t.lit.is_some())
@@ -562,7 +612,8 @@ mod tests {
         assert_eq!(
             lits,
             vec![
-                "i42", "f1.5", "f0.5", "f5.0", "f1000.0", "f0.015", "i31", "i65450", "i1000"
+                "i42", "f1.5", "f0.5", "f5.0", "f1000.0", "f0.015", "i31", "i65450", "i1000",
+                "i5", "i15", "i10"
             ]
         );
     }
@@ -578,12 +629,22 @@ mod tests {
 
     #[test]
     fn operators() {
-        let ts = types("+ ++ += == = != <= < && || ! ++-- -> .. ..= | |x|");
+        let ts = types("+ ++ += == = != <= < && || ! ++-- -> .. ..= | |x| =>");
         assert_eq!(
             ts,
             vec![
                 Plus, PlusPlus, PlusAssign, EqEq, Assign, NotEq, Le, Lt, AndAnd, OrOr, Not,
-                PlusPlus, MinusMinus, Arrow, DotDot, DotDotEq, Pipe, Pipe, Ident, Pipe, Eof
+                PlusPlus, MinusMinus, Arrow, DotDot, DotDotEq, Pipe, Pipe, Ident, Pipe,
+                FatArrow, Eof
+            ]
+        );
+        // Bitwise operators and their compound forms.
+        let ts = types("& &= | |= ^ ^= ~ << <<= >> >>= 1 & 2");
+        assert_eq!(
+            ts,
+            vec![
+                Amp, AmpAssign, Pipe, PipeAssign, Caret, CaretAssign, Tilde, Shl, ShlAssign,
+                Shr, ShrAssign, Int, Amp, Int, Eof
             ]
         );
     }
@@ -662,6 +723,9 @@ mod tests {
         assert!(Lexer::new("/* never closed").tokenize().is_err());
         assert!(Lexer::new("let a = $;").tokenize().is_err());
         assert!(Lexer::new("0x").tokenize().is_err());
+        assert!(Lexer::new("0b").tokenize().is_err());
+        assert!(Lexer::new("0b12").tokenize().is_err()); // '2' is not a binary digit
+        assert!(Lexer::new("0o8").tokenize().is_err()); // '8' is not an octal digit
         assert!(Lexer::new("99999999999999999999999").tokenize().is_err());
         assert!(Lexer::new("let a = .;").tokenize().is_err()); // lone '.'
     }

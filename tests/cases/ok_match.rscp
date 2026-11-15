@@ -1,0 +1,13 @@
+// match: literals, alternation, guards, ranges and a catch-all.
+fn describe(n) -> match n {
+    0 => "zero",
+    1 | 2 => "one-or-two",
+    k if k < 0 => "negative",
+    3..=9 => "digit",
+    else => "many"
+}
+println(describe(0))
+println(describe(2))
+println(describe(-7))
+println(describe(9))
+println(describe(42))

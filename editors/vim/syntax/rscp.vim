@@ -1,4 +1,4 @@
-" Vim syntax file for RSCP 2026.2.1.1
+" Vim syntax file for RSCP 2026.3.0.0
 " Place in ~/.vim/syntax/rscp.vim (or ~/.config/nvim/syntax/rscp.vim),
 " together with the ftdetect rule from editors/vim/ftdetect/rscp.vim.
 
@@ -7,7 +7,7 @@ if exists("b:current_syntax")
 endif
 
 " Keywords
-syntax keyword rscpConditional if else
+syntax keyword rscpConditional if else match
 syntax keyword rscpRepeat while loop for in
 syntax keyword rscpStatement return break continue
 syntax keyword rscpKeyword fn let var
@@ -16,7 +16,7 @@ syntax keyword rscpConstant null
 
 " Built-in functions
 syntax keyword rscpBuiltin print println len str int float type abs min max
-syntax keyword rscpBuiltin sqrt pow rand clock push pop keys has assert
+syntax keyword rscpBuiltin sqrt pow rand clock push pop keys has assert panic
 
 " Comments
 syntax match rscpComment "//.*$" contains=rscpTodo
@@ -29,6 +29,8 @@ syntax match rscpEscape +\\[ntr0\\"']+ contained
 
 " Numbers: hex, floats (but not the dots of a range), integers
 syntax match rscpNumber "\<0[xX][0-9a-fA-F_]\+\>"
+syntax match rscpNumber "\<0[bB][01_]\+\>"
+syntax match rscpNumber "\<0[oO][0-7_]\+\>"
 syntax match rscpFloat "\<\(\d[\d_]*\)\=\.\d[\d_]*\([eE][+-]\=\d\+\)\=\>"
 syntax match rscpFloat "\<\d[\d_]*\.\=[eE][+-]\=\d\+\>"
 syntax match rscpNumber "\<\d[\d_]*\>"
@@ -40,7 +42,8 @@ syntax match rscpFuncCall "\<\h\w*\s*\ze("
 " Operators (ranges and arrow first so they win over - and .)
 syntax match rscpRange "\.\.=\=\."
 syntax match rscpArrow "->"
-syntax match rscpOperator "&&\|||\|!\|==\|!=\|<=\|>=\|<\|>\|+\|-\|\*\|/\|%\|=\|?\|:\|++\|--\|+="
+syntax match rscpArrow "=>"
+syntax match rscpOperator "<<=\|>>=\|<<\|>>\|&=\||=\|\^=\|&\|\^\|~\|&&\|||\|!\|==\|!=\|<=\|>=\|<\|>\|+\|-\|\*\|/\|%\|=\|?\|:\|++\|--\|+="
 
 " Short closure pipes |x|
 syntax match rscpPipe "|"

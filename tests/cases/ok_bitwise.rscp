@@ -1,0 +1,19 @@
+// Bitwise operators, shifts and complement; 0b/0o/0x literals.
+let mask = 0b1100 & 0xA
+let flags = 0x0F | 0b100000
+let flip = 0xFF ^ 0x0F
+let big = 1 << 10
+let neg = -16 >> 2
+let all = ~0
+let oct = 0o17
+println(mask, flags, flip, big, neg, all, oct)
+
+var x = 0b1010
+x &= 0x0F
+x |= 1
+x ^= 3
+x <<= 2
+x >>= 1
+println(x)
+
+println(true & false, true | false, true ^ true, ~true)

@@ -1,0 +1,19 @@
+// match nested inside compound assignment, with break and continue
+// jumping out of the loop from an arm body.
+var total = 0
+for i in 0..10 {
+    total += match i {
+        8 => { break }
+        k if k % 2 == 0 => k
+        5 => { continue }
+        else => 0
+    }
+}
+println(total)
+
+var seen = []
+for s in ["a", "b", "x", "c"] {
+    push(seen, match s { "x" => "-", else => s })
+}
+println(seen)
+println(10 + match 2 { 2 => 5, else => 0 })

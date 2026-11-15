@@ -1,0 +1,6 @@
+// match works on strings, bools and null, and as a statement.
+var out = ""
+match "b" { "a" => { out = "A" }, "b" => { out = "B" }, else => { out = "?" } }
+println(out)
+match true { false => { println("f") }, _ => { println("t") } }
+match null { 1 => { println("one") }, else => { println("none") } }

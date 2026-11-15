@@ -71,9 +71,18 @@ pub enum Op {
     IndexGetKeep,
     /// len(array) — used by `for-in`
     ArrayLen,
+    /// bitwise: two ints (or two bools for & | ^)
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    BitNot,
+    /// pop n (u8) cells from under the top value (used by match)
+    PopNUnder,
 }
 
-const ALL_OPS: [Op; 39] = [
+const ALL_OPS: [Op; 46] = [
     Op::Constant,
     Op::Null,
     Op::True,
@@ -113,6 +122,13 @@ const ALL_OPS: [Op; 39] = [
     Op::IndexSet,
     Op::IndexGetKeep,
     Op::ArrayLen,
+    Op::BitAnd,
+    Op::BitOr,
+    Op::BitXor,
+    Op::Shl,
+    Op::Shr,
+    Op::BitNot,
+    Op::PopNUnder,
 ];
 
 impl Op {
@@ -161,18 +177,22 @@ impl Op {
             Op::IndexSet => "IndexSet",
             Op::IndexGetKeep => "IndexGetKeep",
             Op::ArrayLen => "ArrayLen",
+            Op::BitAnd => "BitAnd",
+            Op::BitOr => "BitOr",
+            Op::BitXor => "BitXor",
+            Op::Shl => "Shl",
+            Op::Shr => "Shr",
+            Op::BitNot => "BitNot",
+            Op::PopNUnder => "PopNUnder",
         }
     }
 
     /// The kind (and size) of this opcode's inline operands.
     pub fn operand(self) -> Operand {
         match self {
-            Op::PopN
-            | Op::GetLocal
-            | Op::SetLocal
-            | Op::GetUpvalue
-            | Op::SetUpvalue
-            | Op::Call => Operand::U8,
+            Op::PopN | Op::PopNUnder | Op::GetLocal | Op::SetLocal | Op::GetUpvalue | Op::SetUpvalue | Op::Call => {
+                Operand::U8
+            }
             Op::Constant
             | Op::DefineGlobal
             | Op::DefineGlobalConst

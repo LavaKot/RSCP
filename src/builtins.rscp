@@ -32,6 +32,7 @@ pub fn install(vm: &mut Vm) {
     vm.define_native("keys", n_keys);
     vm.define_native("has", n_has);
     vm.define_native("assert", n_assert);
+    vm.define_native("panic", n_panic);
 }
 
 fn join_display(args: &[Value]) -> String {
@@ -289,6 +290,18 @@ fn n_assert(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
             "assert: expected a bool, got {}",
             other.type_name()
         )),
+    }
+}
+
+/// Abort with a message: `panic("oops")` raises a runtime error carrying the
+/// text (catchable with `try`/`catch`, fatal otherwise).
+fn n_panic(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if args.len() > 1 {
+        return Err(format!("panic: expected 0 or 1 arguments, got {}", args.len()));
+    }
+    match args.len() {
+        0 => Err("panic".to_string()),
+        _ => Err(args[0].display_string(0)),
     }
 }
 

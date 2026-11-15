@@ -26,6 +26,10 @@ const RANGE_END_LOCAL: &str = "%end";
 
 struct Local {
     name: String,
+    /// Stack slot (frame-relative). With temporaries pending on the stack
+    /// (e.g. a `match` compiled as a call argument), a local's cell sits
+    /// above them, so the slot is not simply its index in `locals`.
+    slot: u8,
     depth: usize,
     mutable: bool,
 }
@@ -35,6 +39,11 @@ struct FnCtx {
     locals: Vec<Local>,
     scope_depth: usize,
     is_script: bool,
+    /// Temporary stack cells above the locals region right now. Every
+    /// expression leaves its result counted here; opcodes that consume
+    /// operands decrement it. `declare_local` uses it to place a new
+    /// local's cell at the true stack position.
+    pending: usize,
 }
 
 struct LoopCtx {
@@ -44,6 +53,10 @@ struct LoopCtx {
     /// Locals live when the loop started; `break` unwinds to here (loop
     /// scope variables die with the loop).
     locals_at_entry: usize,
+    /// Temps pending when the loop started (a loop inside a match-arm block
+    /// has the enclosing expression's temps below it); `break` pops those
+    /// pushed since, on top of the loop's locals.
+    pending_at_entry: usize,
     /// Locals after the loop's own scope was set up (e.g. after the `for`
     /// initializer); `continue` unwinds to here but keeps these alive.
     cont_locals: usize,
@@ -65,14 +78,17 @@ pub fn compile(program: &[Stmt]) -> Result<Rc<FnProto>, RscpError> {
             },
             locals: vec![Local {
                 name: String::new(),
+                slot: 0,
                 depth: 0,
                 mutable: false,
             }],
             scope_depth: 0,
             is_script: true,
+            pending: 0,
         }],
         loops: Vec::new(),
         top_names: Vec::new(),
+        temp_n: 0,
     };
     c.stmts(program)?;
     let line = program.last().map_or(1, |s| s.line);
@@ -87,6 +103,8 @@ struct Compiler {
     loops: Vec<LoopCtx>,
     /// Names already declared at the script top level (duplicate detection).
     top_names: Vec<String>,
+    /// Counter for hidden `%mN`/`%rN` locals of nested match expressions.
+    temp_n: usize,
 }
 
 impl Compiler {
@@ -103,6 +121,21 @@ impl Compiler {
 
     fn err(&self, msg: impl Into<String>, line: usize, col: usize) -> RscpError {
         RscpError::compile(msg, line, col)
+    }
+
+    // ---- temporary-stack bookkeeping ---------------------------------------
+    //
+    // `pending` mirrors how many temporary cells sit above the locals
+    // region, so `declare_local` can compute true stack slots (a `match`
+    // compiled as a call argument declares locals above earlier operands).
+
+    fn push_temp(&mut self) {
+        self.cur().pending += 1;
+    }
+
+    fn drop_temps(&mut self, n: usize) {
+        let ctx = self.cur();
+        ctx.pending = ctx.pending.saturating_sub(n);
     }
 
     // ---- emit helpers ------------------------------------------------------
@@ -194,6 +227,8 @@ impl Compiler {
     }
 
     /// Declare a local for the value that is currently on top of the stack.
+    /// The cell may sit above pending temporaries, so the slot is derived
+    /// from `locals.len() + pending`; declaring consumes one pending temp.
     fn declare_local(
         &mut self,
         name: &str,
@@ -210,23 +245,35 @@ impl Compiler {
         {
             return Err(self.err(format!("'{name}' is already defined in this scope"), line, col));
         }
-        if self.cur().locals.len() >= MAX_LOCALS + 1 {
+        let ctx = self.cur();
+        if ctx.pending == 0 {
+            return Err(self.err(
+                "internal error: declare_local without a value on the stack",
+                line,
+                col,
+            ));
+        }
+        let slot = ctx.locals.len() + ctx.pending - 1;
+        if slot > MAX_LOCALS {
             return Err(self.err(format!("too many local variables (max is {MAX_LOCALS})"), line, col));
         }
-        self.cur().locals.push(Local {
+        ctx.pending -= 1;
+        ctx.locals.push(Local {
             name: name.to_string(),
+            slot: slot as u8,
             depth,
             mutable,
         });
-        Ok((self.cur().locals.len() - 1) as u8)
+        Ok(slot as u8)
     }
 
     fn resolve_local(&self, name: &str) -> Option<u8> {
         let ctx = self.fns.last().unwrap();
         ctx.locals
             .iter()
-            .rposition(|l| l.name == name)
-            .map(|i| i as u8)
+            .rev()
+            .find(|l| l.name == name)
+            .map(|l| l.slot)
     }
 
     fn resolve_upvalue(&mut self, name: &str, line: usize, col: usize) -> Result<Option<u8>, RscpError> {
@@ -246,11 +293,8 @@ impl Compiler {
         if fi == 0 {
             return Ok(None);
         }
-        if let Some(slot) = self.fns[fi - 1].locals.iter().rposition(|l| l.name == name) {
-            if slot > u8::MAX as usize {
-                return Err(self.err("too many locals in the enclosing function", line, col));
-            }
-            return self.add_upvalue(fi, true, slot as u8, line, col).map(Some);
+        if let Some(l) = self.fns[fi - 1].locals.iter().rev().find(|l| l.name == name) {
+            return self.add_upvalue(fi, true, l.slot, line, col).map(Some);
         }
         if let Some(up) = self.resolve_upvalue_from(fi - 1, name, line, col)? {
             return self.add_upvalue(fi, false, up, line, col).map(Some);
@@ -300,6 +344,7 @@ impl Compiler {
                     let ci = self.string_const(name, s.line, s.col)?;
                     let op = if *mutable { Op::DefineGlobal } else { Op::DefineGlobalConst };
                     self.emit_u16(op, ci, s.line, s.col);
+                    self.drop_temps(1);
                 } else {
                     // Init first, then declare: `let x = x;` refers to an outer x.
                     self.expr(init)?;
@@ -309,6 +354,7 @@ impl Compiler {
             StmtKind::Fn { name, func } => {
                 let ci = self.function(func, Some(name))?;
                 self.emit_closure(ci, s.line, s.col)?;
+                self.push_temp();
                 if self.at_top_level() {
                     if self.top_names.iter().any(|n| n == name) {
                         return Err(self.err(format!("'{name}' is already defined at the top level"), s.line, s.col));
@@ -316,6 +362,7 @@ impl Compiler {
                     self.top_names.push(name.clone());
                     let gi = self.string_const(name, s.line, s.col)?;
                     self.emit_u16(Op::DefineGlobalConst, gi, s.line, s.col);
+                    self.drop_temps(1);
                 } else {
                     // Named function bindings are immutable.
                     self.declare_local(name, false, s.line, s.col)?;
@@ -331,6 +378,7 @@ impl Compiler {
             StmtKind::Expr(e) => {
                 self.expr(e)?;
                 self.emit(Op::Pop, s.line, s.col);
+                self.drop_temps(1);
             }
             StmtKind::Block(stmts) => {
                 self.begin_scope();
@@ -341,10 +389,12 @@ impl Compiler {
                 self.expr(cond)?;
                 let jelse = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
                 self.emit(Op::Pop, s.line, s.col);
+                self.drop_temps(1);
                 self.stmt(then)?;
                 let jend = self.emit_jump(Op::Jump, s.line, s.col)?;
                 self.patch_jump(jelse, s.line, s.col)?;
                 self.emit(Op::Pop, s.line, s.col);
+                self.drop_temps(1);
                 if let Some(e) = els {
                     self.stmt(e)?;
                 }
@@ -355,11 +405,13 @@ impl Compiler {
                 self.expr(cond)?;
                 let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
                 self.emit(Op::Pop, s.line, s.col);
+                self.drop_temps(1);
 
                 let locals_at_entry = self.cur_locals();
                 self.loops.push(LoopCtx {
                     fn_depth: self.fns.len(),
                     locals_at_entry,
+                    pending_at_entry: self.fns.last().unwrap().pending,
                     cont_locals: locals_at_entry,
                     breaks: Vec::new(),
                     conts: Vec::new(),
@@ -371,6 +423,7 @@ impl Compiler {
                 self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
                 self.patch_jump(jend, s.line, s.col)?;
                 self.emit(Op::Pop, s.line, s.col);
+                self.drop_temps(1);
                 for b in ctx.breaks {
                     self.patch_jump(b, s.line, s.col)?;
                 }
@@ -386,14 +439,17 @@ impl Compiler {
                     Some(c) => self.expr(c)?,
                     None => {
                         self.emit(Op::True, s.line, s.col);
+                        self.push_temp();
                     }
                 }
                 let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
                 self.emit(Op::Pop, s.line, s.col);
+                self.drop_temps(1);
 
                 self.loops.push(LoopCtx {
                     fn_depth: self.fns.len(),
                     locals_at_entry,
+                    pending_at_entry: self.fns.last().unwrap().pending,
                     cont_locals: self.cur_locals(),
                     breaks: Vec::new(),
                     conts: Vec::new(),
@@ -410,6 +466,7 @@ impl Compiler {
                 self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
                 self.patch_jump(jend, s.line, s.col)?;
                 self.emit(Op::Pop, s.line, s.col);
+                self.drop_temps(1);
                 for c in ctx.conts {
                     self.patch_to(c, step_start);
                 }
@@ -432,6 +489,7 @@ impl Compiler {
                     // Placeholder cell for the loop variable, filled by
                     // SetLocal at the top of each iteration.
                     self.emit(Op::Null, s.line, s.col);
+                    self.push_temp();
                     let elem_slot = self.declare_local(name, *mutable, s.line, s.col)?;
 
                     let cond_start = self.cur_len();
@@ -445,6 +503,7 @@ impl Compiler {
                     self.loops.push(LoopCtx {
                         fn_depth: self.fns.len(),
                         locals_at_entry,
+                        pending_at_entry: self.fns.last().unwrap().pending,
                         cont_locals: self.cur_locals(),
                         breaks: Vec::new(),
                         conts: Vec::new(),
@@ -480,11 +539,13 @@ impl Compiler {
                 let iter_slot = self.declare_local(ITER_LOCAL, false, s.line, s.col)?;
                 let zero_ci = self.int_const(0, s.line, s.col)?;
                 self.emit_u16(Op::Constant, zero_ci, s.line, s.col);
+                self.push_temp();
                 let idx_slot = self.declare_local(INDEX_LOCAL, true, s.line, s.col)?;
                 // Placeholder for the element variable: its slot is written
                 // by SetLocal at the top of each iteration, so the stack must
                 // own a cell for it from the start.
                 self.emit(Op::Null, s.line, s.col);
+                self.push_temp();
                 let elem_slot = self.declare_local(name, *mutable, s.line, s.col)?;
 
                 let cond_start = self.cur_len();
@@ -498,6 +559,7 @@ impl Compiler {
                 self.loops.push(LoopCtx {
                     fn_depth: self.fns.len(),
                     locals_at_entry,
+                    pending_at_entry: self.fns.last().unwrap().pending,
                     cont_locals: self.cur_locals(),
                     breaks: Vec::new(),
                     conts: Vec::new(),
@@ -539,20 +601,30 @@ impl Compiler {
                     Some(e) => self.expr(e)?,
                     None => {
                         self.emit(Op::Null, s.line, s.col);
+                        self.push_temp();
                     }
                 }
                 self.emit(Op::Return, s.line, s.col);
+                self.drop_temps(1);
             }
             StmtKind::Break => {
                 if !self.loop_available() {
                     return Err(self.err("'break' outside of a loop", s.line, s.col));
                 }
-                let n = {
+                let (n, temps) = {
                     let ctx = self.loops.last().unwrap();
-                    self.cur_locals() - ctx.locals_at_entry
+                    (
+                        self.cur_locals() - ctx.locals_at_entry,
+                        self.fns.last().unwrap().pending.saturating_sub(ctx.pending_at_entry),
+                    )
                 };
+                // Locals sit above any temps pushed since the loop opened,
+                // so pop them first, then the temps.
                 if n > 0 {
                     self.emit_u8(Op::PopN, n.min(u8::MAX as usize) as u8, s.line, s.col);
+                }
+                if temps > 0 {
+                    self.emit_u8(Op::PopN, temps.min(u8::MAX as usize) as u8, s.line, s.col);
                 }
                 let site = self.emit_jump(Op::Jump, s.line, s.col)?;
                 self.loops.last_mut().unwrap().breaks.push(site);
@@ -561,12 +633,19 @@ impl Compiler {
                 if !self.loop_available() {
                     return Err(self.err("'continue' outside of a loop", s.line, s.col));
                 }
-                let (target, n) = {
+                let (target, n, temps) = {
                     let ctx = self.loops.last().unwrap();
-                    (ctx.cont_target, self.cur_locals() - ctx.cont_locals)
+                    (
+                        ctx.cont_target,
+                        self.cur_locals() - ctx.cont_locals,
+                        self.fns.last().unwrap().pending.saturating_sub(ctx.pending_at_entry),
+                    )
                 };
                 if n > 0 {
                     self.emit_u8(Op::PopN, n.min(u8::MAX as usize) as u8, s.line, s.col);
+                }
+                if temps > 0 {
+                    self.emit_u8(Op::PopN, temps.min(u8::MAX as usize) as u8, s.line, s.col);
                 }
                 match target {
                     Some(t) => self.emit_jump_to(Op::Jump, t, s.line, s.col)?,
@@ -630,9 +709,11 @@ impl Compiler {
                         None => {
                             let ci = self.int_const(1, *tl, *tc)?;
                             self.emit_u16(Op::Constant, ci, line, col);
+                            self.push_temp();
                         }
                     }
                     self.emit_binop(bin, line, col)?;
+                    self.drop_temps(1);
                 } else {
                     self.expr(value.unwrap())?;
                 }
@@ -646,18 +727,22 @@ impl Compiler {
                     // current value, the binary op combines it, IndexSet
                     // then consumes obj, idx and the new value.
                     self.emit(Op::IndexGetKeep, line, col);
+                    self.push_temp();
                     match value {
                         Some(v) => self.expr(v)?,
                         None => {
                             let ci = self.int_const(1, line, col)?;
                             self.emit_u16(Op::Constant, ci, line, col);
+                            self.push_temp();
                         }
                     }
                     self.emit_binop(bin, line, col)?;
+                    self.drop_temps(1);
                 } else {
                     self.expr(value.unwrap())?;
                 }
                 self.emit(Op::IndexSet, line, col);
+                self.drop_temps(3);
             }
         }
         Ok(())
@@ -672,13 +757,21 @@ impl Compiler {
             let ci = self.string_const(name, line, col)?;
             self.emit_u16(Op::GetGlobal, ci, line, col);
         }
+        self.push_temp();
         Ok(())
     }
 
     fn store_ident(&mut self, name: &str, line: usize, col: usize) -> Result<(), RscpError> {
         if let Some(slot) = self.resolve_local(name) {
-            let local = &self.fns.last().unwrap().locals[slot as usize];
-            if !local.mutable {
+            let immutable = self
+                .fns
+                .last()
+                .unwrap()
+                .locals
+                .iter()
+                .find(|l| l.slot == slot)
+                .map_or(false, |l| !l.mutable);
+            if immutable {
                 return Err(self.err(
                     format!("cannot assign to immutable variable '{name}' (declared with 'let')"),
                     line,
@@ -692,6 +785,7 @@ impl Compiler {
             let ci = self.string_const(name, line, col)?;
             self.emit_u16(Op::SetGlobal, ci, line, col);
         }
+        self.drop_temps(1);
         Ok(())
     }
 
@@ -702,20 +796,25 @@ impl Compiler {
             ExprKind::Int(v) => {
                 let ci = self.constant(Value::Int(*v), e.line, e.col)?;
                 self.emit_u16(Op::Constant, ci, e.line, e.col);
+                self.push_temp();
             }
             ExprKind::Float(v) => {
                 let ci = self.constant(Value::Float(*v), e.line, e.col)?;
                 self.emit_u16(Op::Constant, ci, e.line, e.col);
+                self.push_temp();
             }
             ExprKind::Str(v) => {
                 let ci = self.string_const(v, e.line, e.col)?;
                 self.emit_u16(Op::Constant, ci, e.line, e.col);
+                self.push_temp();
             }
             ExprKind::Bool(b) => {
                 self.emit(if *b { Op::True } else { Op::False }, e.line, e.col);
+                self.push_temp();
             }
             ExprKind::Null => {
                 self.emit(Op::Null, e.line, e.col);
+                self.push_temp();
             }
             ExprKind::Ident(name) => {
                 self.load_ident(name, e.line, e.col)?;
@@ -729,12 +828,16 @@ impl Compiler {
                     UnaryOp::Neg => {
                         self.emit(Op::Negate, e.line, e.col);
                     }
+                    UnaryOp::BitNot => {
+                        self.emit(Op::BitNot, e.line, e.col);
+                    }
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 self.expr(lhs)?;
                 self.expr(rhs)?;
                 self.emit_binop(*op, e.line, e.col)?;
+                self.drop_temps(1); // two operands consumed, one result
             }
             ExprKind::Logical { op, lhs, rhs } => {
                 self.expr(lhs)?;
@@ -743,6 +846,7 @@ impl Compiler {
                     LogicalOp::Or => self.emit_jump(Op::JumpIfTruePeek, e.line, e.col)?,
                 };
                 self.emit(Op::Pop, e.line, e.col);
+                self.drop_temps(1); // lhs replaced by rhs below
                 self.expr(rhs)?;
                 self.patch_jump(jump, e.line, e.col)?;
             }
@@ -750,12 +854,17 @@ impl Compiler {
                 self.expr(cond)?;
                 let jelse = self.emit_jump(Op::JumpIfFalsePeek, e.line, e.col)?;
                 self.emit(Op::Pop, e.line, e.col);
+                self.drop_temps(1);
                 self.expr(then)?;
                 let jend = self.emit_jump(Op::Jump, e.line, e.col)?;
                 self.patch_jump(jelse, e.line, e.col)?;
                 self.emit(Op::Pop, e.line, e.col);
+                self.drop_temps(1);
                 self.expr(els)?;
                 self.patch_jump(jend, e.line, e.col)?;
+            }
+            ExprKind::Match { value, arms } => {
+                self.compile_match(value, arms, e.line, e.col)?;
             }
             ExprKind::Call { callee, args } => {
                 if args.len() > u8::MAX as usize {
@@ -766,11 +875,14 @@ impl Compiler {
                     self.expr(a)?;
                 }
                 self.emit_u8(Op::Call, args.len() as u8, e.line, e.col);
+                self.drop_temps(args.len() + 1); // callee + args consumed
+                self.push_temp(); // the result
             }
             ExprKind::Index { obj, idx } => {
                 self.expr(obj)?;
                 self.expr(idx)?;
                 self.emit(Op::IndexGet, e.line, e.col);
+                self.drop_temps(1);
             }
             ExprKind::Range { .. } => {
                 return Err(self.err(
@@ -787,6 +899,8 @@ impl Compiler {
                     self.expr(item)?;
                 }
                 self.emit_u16(Op::Array, items.len() as u16, e.line, e.col);
+                self.drop_temps(items.len());
+                self.push_temp();
             }
             ExprKind::Map(pairs) => {
                 if pairs.len() > u16::MAX as usize {
@@ -797,10 +911,13 @@ impl Compiler {
                     self.expr(v)?;
                 }
                 self.emit_u16(Op::Map, pairs.len() as u16, e.line, e.col);
+                self.drop_temps(pairs.len() * 2);
+                self.push_temp();
             }
             ExprKind::Func(lit) => {
                 let ci = self.function(lit, None)?;
                 self.emit_closure(ci, e.line, e.col)?;
+                self.push_temp();
             }
         }
         Ok(())
@@ -813,6 +930,11 @@ impl Compiler {
             BinaryOp::Mul => Op::Mul,
             BinaryOp::Div => Op::Div,
             BinaryOp::Mod => Op::Mod,
+            BinaryOp::BitAnd => Op::BitAnd,
+            BinaryOp::BitOr => Op::BitOr,
+            BinaryOp::BitXor => Op::BitXor,
+            BinaryOp::Shl => Op::Shl,
+            BinaryOp::Shr => Op::Shr,
             BinaryOp::Eq => Op::Equal,
             BinaryOp::Lt => Op::Less,
             BinaryOp::Le => Op::Le,
@@ -825,6 +947,226 @@ impl Compiler {
             }
         };
         self.emit(opcode, line, col);
+        Ok(())
+    }
+
+    /// Compile `match value { arms }` as an expression: the result is left
+    /// on the stack with no hidden slots underneath (see the body comment).
+    fn compile_match(
+        &mut self,
+        value: &Expr,
+        arms: &[MatchArm],
+        line: usize,
+        col: usize,
+    ) -> Result<(), RscpError> {
+        // The scrutinee lives in a hidden `%mN` local, the arm value in a
+        // hidden `%rN` local (so arm scopes can close their bindings before
+        // the value is produced). Both are forgotten again at the end:
+        // `PopNUnder 2` drops their cells from under the result, keeping the
+        // stack contiguous for surrounding expressions (`x += match ...`).
+        let locals_at_start = self.cur_locals();
+        self.expr(value)?;
+        let m_slot = self.declare_local(&format!("%m{}", self.temp_n), false, line, col)?;
+        self.emit(Op::Null, line, col);
+        self.push_temp();
+        let r_slot = self.declare_local(&format!("%r{}", self.temp_n), false, line, col)?;
+        self.temp_n += 1;
+
+        let mut end_jumps: Vec<usize> = Vec::new();
+        let mut next_jumps: Vec<usize> = Vec::new(); // to the next arm / fallthrough
+
+        for arm in arms {
+            // Jump sites from the previous arm's failure handlers.
+            for j in next_jumps.drain(..) {
+                self.patch_jump(j, line, col)?;
+            }
+
+            let mut jt_sites: Vec<usize> = Vec::new(); // alternation: true -> stub
+            let mut jf_sites: Vec<usize> = Vec::new(); // last test: false -> next arm
+            let last = arm.patterns.len() - 1;
+            for (i, p) in arm.patterns.iter().enumerate() {
+                if matches!(p, Pattern::Binding(_) | Pattern::Wildcard) {
+                    continue; // always matches; the parser keeps them alone
+                }
+                self.test_pattern(p, m_slot, line, col)?;
+                if i < last {
+                    let jt = self.emit_jump(Op::JumpIfTruePeek, line, col)?;
+                    jt_sites.push(jt);
+                    self.emit(Op::Pop, line, col); // false: try the next pattern
+                } else {
+                    let jf = self.emit_jump(Op::JumpIfFalsePeek, line, col)?;
+                    jf_sites.push(jf);
+                    self.emit(Op::Pop, line, col); // true: run this arm
+                }
+            }
+            let body_start = self.cur_len();
+
+            // Arm scope, binding, guard.
+            let locals_before = self.cur_locals();
+            self.begin_scope();
+            if let Pattern::Binding(name) = &arm.patterns[0] {
+                self.emit_u8(Op::GetLocal, m_slot, line, col);
+                self.push_temp();
+                self.declare_local(name, false, line, col)?;
+            }
+            let mut guard_fail: Option<usize> = None;
+            let mut guard_pops = 0usize;
+            if let Some(g) = &arm.guard {
+                self.expr(g)?;
+                guard_fail = Some(self.emit_jump(Op::JumpIfFalsePeek, line, col)?);
+                self.emit(Op::Pop, line, col);
+                self.drop_temps(1);
+                guard_pops = self.cur_locals() - locals_before; // the binding, if any
+            }
+
+            // Body: an expression, or a block whose last expression statement
+            // is the arm's value.
+            match &arm.body {
+                MatchBody::Expr(e) => self.expr(e)?,
+                MatchBody::Block(stmts) => self.block_value(stmts, line, col)?,
+            }
+            self.emit_u8(Op::SetLocal, r_slot, line, col);
+            self.drop_temps(1);
+            self.end_scope(line, col);
+            end_jumps.push(self.emit_jump(Op::Jump, line, col)?);
+
+            // Alternation true-paths jump here with the test bool still
+            // peeked on the stack: pop it and enter the body. (Test bools
+            // are raw emits, never counted in `pending`.)
+            if !jt_sites.is_empty() {
+                for jt in jt_sites {
+                    self.patch_jump(jt, line, col)?;
+                }
+                self.emit(Op::Pop, line, col);
+                self.emit_jump_to(Op::Jump, body_start, line, col)?;
+            }
+
+            // Failure handlers land here, after the successful path jumped away.
+            for &jf in &jf_sites {
+                self.patch_jump(jf, line, col)?;
+            }
+            if !jf_sites.is_empty() {
+                self.emit(Op::Pop, line, col); // the failed test bool (peeked)
+                next_jumps.push(self.emit_jump(Op::Jump, line, col)?);
+            }
+            if let Some(gf) = guard_fail {
+                self.patch_jump(gf, line, col)?;
+                // Pop the peeked guard bool; `pending` already accounts for
+                // it via the true-path Pop above (linear fall-through model).
+                self.emit(Op::Pop, line, col);
+                if guard_pops > 0 {
+                    self.emit_u8(Op::PopN, guard_pops as u8, line, col);
+                }
+                next_jumps.push(self.emit_jump(Op::Jump, line, col)?);
+            }
+        }
+        for j in next_jumps.drain(..) {
+            self.patch_jump(j, line, col)?;
+        }
+
+        // No arm matched: a catchable runtime error via panic().
+        let p_ci = self.string_const("panic", line, col)?;
+        self.emit_u16(Op::GetGlobal, p_ci, line, col);
+        self.push_temp();
+        let msg_ci = self.string_const("match: no arm matched the value", line, col)?;
+        self.emit_u16(Op::Constant, msg_ci, line, col);
+        self.push_temp();
+        self.emit_u8(Op::Call, 1, line, col);
+        self.drop_temps(2);
+        self.push_temp();
+        self.emit(Op::Pop, line, col);
+        self.drop_temps(1);
+
+        for j in end_jumps {
+            self.patch_jump(j, line, col)?;
+        }
+        self.emit_u8(Op::GetLocal, r_slot, line, col);
+        self.push_temp();
+        // Drop the two hidden cells from under the result and forget them,
+        // so the enclosing scope does not pop them a second time.
+        self.emit_u8(Op::PopNUnder, 2, line, col);
+        self.cur().locals.truncate(locals_at_start);
+        Ok(())
+    }
+
+    /// Emit a comparison of the scrutinee local `m_slot` against one
+    /// literal or range pattern, leaving the test bool on the stack.
+    fn test_pattern(
+        &mut self,
+        p: &Pattern,
+        m_slot: u8,
+        line: usize,
+        col: usize,
+    ) -> Result<(), RscpError> {
+        match p {
+            Pattern::Int(v) => {
+                self.emit_u8(Op::GetLocal, m_slot, line, col);
+                let ci = self.int_const(*v, line, col)?;
+                self.emit_u16(Op::Constant, ci, line, col);
+                self.emit(Op::Equal, line, col);
+            }
+            Pattern::Float(v) => {
+                self.emit_u8(Op::GetLocal, m_slot, line, col);
+                let ci = self.constant(Value::Float(*v), line, col)?;
+                self.emit_u16(Op::Constant, ci, line, col);
+                self.emit(Op::Equal, line, col);
+            }
+            Pattern::Str(s) => {
+                self.emit_u8(Op::GetLocal, m_slot, line, col);
+                let ci = self.string_const(s, line, col)?;
+                self.emit_u16(Op::Constant, ci, line, col);
+                self.emit(Op::Equal, line, col);
+            }
+            Pattern::Bool(b) => {
+                self.emit_u8(Op::GetLocal, m_slot, line, col);
+                self.emit(if *b { Op::True } else { Op::False }, line, col);
+                self.emit(Op::Equal, line, col);
+            }
+            Pattern::Null => {
+                self.emit_u8(Op::GetLocal, m_slot, line, col);
+                self.emit(Op::Null, line, col);
+                self.emit(Op::Equal, line, col);
+            }
+            Pattern::Range { lo, hi, inclusive } => {
+                // lo <= m && m (<= or <) hi, with &&'s peek-jump shape so
+                // exactly one bool is on the stack at the end.
+                self.emit_u8(Op::GetLocal, m_slot, line, col);
+                let lo_ci = self.int_const(*lo, line, col)?;
+                self.emit_u16(Op::Constant, lo_ci, line, col);
+                self.emit(Op::Ge, line, col);
+                let jf = self.emit_jump(Op::JumpIfFalsePeek, line, col)?;
+                self.emit(Op::Pop, line, col);
+                self.emit_u8(Op::GetLocal, m_slot, line, col);
+                let hi_ci = self.int_const(*hi, line, col)?;
+                self.emit_u16(Op::Constant, hi_ci, line, col);
+                self.emit(if *inclusive { Op::Le } else { Op::Less }, line, col);
+                self.patch_jump(jf, line, col)?;
+            }
+            Pattern::Binding(_) | Pattern::Wildcard => {}
+        }
+        Ok(())
+    }
+
+    /// Compile a match-arm block body, leaving its value on the stack: the
+    /// value of the last statement when it is an expression, else null.
+    fn block_value(&mut self, stmts: &[Stmt], line: usize, col: usize) -> Result<(), RscpError> {
+        match stmts.split_last() {
+            None => {
+                self.emit(Op::Null, line, col);
+                self.push_temp();
+            }
+            Some((last, rest)) => {
+                self.stmts(rest)?;
+                match &last.kind {
+                    StmtKind::Expr(e) => self.expr(e)?,
+                    _ => {
+                        self.stmt(last)?;
+                        self.emit(Op::Null, line, col);
+                        self.push_temp();
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -845,15 +1187,18 @@ impl Compiler {
             // Slot 0 is reserved for the running closure itself.
             locals: vec![Local {
                 name: String::new(),
+                slot: 0,
                 depth: 1,
                 mutable: false,
             }],
             scope_depth: 1,
             is_script: false,
+            pending: 0,
         };
-        for p in &lit.params {
+        for (i, p) in lit.params.iter().enumerate() {
             ctx.locals.push(Local {
                 name: p.clone(),
+                slot: i as u8 + 1,
                 depth: 1,
                 mutable: true, // parameters are assignable
             });
