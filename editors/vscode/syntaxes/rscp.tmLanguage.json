@@ -4,27 +4,6 @@
   "scopeName": "source.rscp",
   "patterns": [
     {
-      "name": "string.interpolated.rscp",
-      "begin": "\\bf\"",
-      "end": "\"",
-      "patterns": [
-        {
-          "name": "constant.character.escape.rscp",
-          "match": "\\\\(n|t|r|0|\\\\|\"|')|\\{\\{|\\}\\}"
-        },
-        {
-          "name": "meta.embedded.line.rscp",
-          "begin": "\\{",
-          "end": "\\}",
-          "patterns": [
-            {
-              "include": "$self"
-            }
-          ]
-        }
-      ]
-    },
-    {
       "include": "#comments"
     },
     {
@@ -63,13 +42,101 @@
       ]
     },
     "strings": {
-      "name": "string.quoted.double.rscp",
-      "begin": "\"",
-      "end": "\"",
       "patterns": [
         {
-          "name": "constant.character.escape.rscp",
-          "match": "\\\\(n|t|r|0|\\\\|\"|')"
+          "name": "string.interpolated.rscp",
+          "begin": "\\b[fF][rR]?\"\"\"|\\b[rR][fF]\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.rscp",
+              "match": "\\\\(n|t|r|0|a|b|f|v|e|x[0-9a-fA-F][0-9a-fA-F]|u\\{[0-9a-fA-F]{1,6}\\}|\\\\|\"|')"
+            },
+            {
+              "name": "meta.embedded.line.rscp",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [
+                {
+                  "include": "$self"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.triple.rscp",
+          "begin": "\\b[rRbBuU]{0,2}\"\"\"|\\b[rRbBuU]{0,2}'''",
+          "end": "\"\"\"|'''"
+        },
+        {
+          "name": "string.interpolated.rscp",
+          "begin": "\\b[fF][rR]?\"|\\b[rR][fF]\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.rscp",
+              "match": "\\\\(n|t|r|0|a|b|f|v|e|x[0-9a-fA-F][0-9a-fA-F]|u\\{[0-9a-fA-F]{1,6}\\}|\\\\|\"|')"
+            },
+            {
+              "name": "meta.embedded.line.rscp",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [
+                {
+                  "include": "$self"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.interpolated.rscp",
+          "begin": "\\b[fF][rR]?'|\\b[rR][fF]'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.rscp",
+              "match": "\\\\(n|t|r|0|a|b|f|v|e|x[0-9a-fA-F][0-9a-fA-F]|u\\{[0-9a-fA-F]{1,6}\\}|\\\\|\"|')"
+            },
+            {
+              "name": "meta.embedded.line.rscp",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [
+                {
+                  "include": "$self"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.other.rscp",
+          "begin": "\\b[rRbBuU]{1,2}\"|\\b[rRbBuU]{1,2}'",
+          "end": "\"|'"
+        },
+        {
+          "name": "string.quoted.double.rscp",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.rscp",
+              "match": "\\\\(n|t|r|0|a|b|f|v|e|x[0-9a-fA-F][0-9a-fA-F]|u\\{[0-9a-fA-F]{1,6}\\}|\\\\|\"|')"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.rscp",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.rscp",
+              "match": "\\\\(n|t|r|0|a|b|f|v|e|x[0-9a-fA-F][0-9a-fA-F]|u\\{[0-9a-fA-F]{1,6}\\}|\\\\|\"|')"
+            }
+          ]
         }
       ]
     },

@@ -1,0 +1,14 @@
+# String literals since 2026.5.3: quotes, prefixes, multiline, escapes
+let a = 'single'
+let b = "double"
+let m = """multiline
+text"""
+let r = r"C:\path\no\escape"
+let u = u'unicode is plain'
+let bb = b"hi"
+println(a, b)
+println(len(m), m == "multiline\ntext")
+println(len(r), r)
+println(u, bb, bb + [33])
+println("\x41B\u{43}")
+println('nested "double" inside')

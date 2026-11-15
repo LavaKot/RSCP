@@ -6,6 +6,8 @@ pub enum Lit {
     Int(i64),
     Float(f64),
     Str(String),
+    /// b"..." — the UTF-8 byte values of a bytes literal.
+    Bytes(Vec<u8>),
     /// An f-string: literal chunks alternating with raw expression sources
     /// plus the position where each expression starts.
     FStr(Vec<FStrPart>),
@@ -27,6 +29,7 @@ pub enum TokenType {
     Int,
     Float,
     Str,
+    Bytes,
     FStr,
     Ident,
     // Keywords
@@ -114,9 +117,6 @@ pub enum TokenType {
     NotWord,
     // End of input
     Eof,
-    /// Internal: a lexical error carried out of scanners that cannot fail
-    /// (f-strings). The lexer driver turns it into an `RscpError`.
-    Error,
 }
 
 impl TokenType {
@@ -127,6 +127,7 @@ impl TokenType {
             Int => "an integer literal",
             Float => "a float literal",
             Str => "a string literal",
+            Bytes => "a bytes literal (b\"...\")",
             FStr => "an f-string literal",
             Ident => "an identifier",
             Fn => "'fn'",
@@ -204,7 +205,6 @@ impl TokenType {
             Or => "'or'",
             NotWord => "'not'",
             Eof => "end of input",
-            Error => "an invalid token",
         };
         s.to_string()
     }

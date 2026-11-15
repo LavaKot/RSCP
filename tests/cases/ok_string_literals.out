@@ -1,0 +1,6 @@
+single double
+14 true
+17 C:\path\no\escape
+unicode is plain [104, 105] [104, 105, 33]
+ABC
+nested "double" inside

@@ -1054,6 +1054,19 @@ impl Parser {
                 };
                 Ok(Expr::new(ExprKind::Str(v), line, col))
             }
+            Bytes => {
+                // b"..." — an array of UTF-8 byte values (2026.5.3).
+                self.advance();
+                let bytes = match tok.lit {
+                    Some(Lit::Bytes(b)) => b,
+                    _ => unreachable!(),
+                };
+                let items = bytes
+                    .into_iter()
+                    .map(|b| Expr::new(ExprKind::Int(i64::from(b)), line, col))
+                    .collect();
+                Ok(Expr::new(ExprKind::Array(items), line, col))
+            }
             FStr => {
                 self.advance();
                 let raw = match tok.lit {

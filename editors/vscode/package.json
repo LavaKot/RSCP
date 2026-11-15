@@ -2,7 +2,7 @@
   "name": "rscp",
   "displayName": "RSCP",
   "description": "RSCP language support: syntax highlighting, snippets and bracket support for .rscp files (light like Python, shaped like Rust)",
-  "version": "2026.5.2",
+  "version": "2026.5.3",
   "publisher": "rscp-lang",
   "license": "MIT",
   "engines": {

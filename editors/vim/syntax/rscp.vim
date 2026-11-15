@@ -1,4 +1,4 @@
-" Vim syntax file for RSCP 2026.5.2.0
+" Vim syntax file for RSCP 2026.5.3.0
 " Place in ~/.vim/syntax/rscp.vim (or ~/.config/nvim/syntax/rscp.vim),
 " together with the ftdetect rule from editors/vim/ftdetect/rscp.vim.
 
@@ -24,13 +24,20 @@ syntax keyword rscpBuiltin split join replace contains starts_with ends_with sli
 syntax match rscpComment "#.*$" contains=rscpTodo
 syntax keyword rscpTodo TODO FIXME XXX NOTE HACK contained
 
-" Strings with escapes
+" Strings with escapes (2026.5.3: single quotes, triple quotes, r/b/u prefixes)
+syntax region rscpString start=/\v"""/ end=/"""/
+syntax region rscpString start=/\v'''/ end=/'''/
 syntax region rscpString start=/"/ skip=/\\./ end=/"/ contains=rscpEscape
+syntax region rscpString start=/'/ skip=/\\./ end=/'/ contains=rscpEscape
+syntax region rscpString start=/\v[rRbBuU]{1,2}"/ skip=/\\./ end=/"/ contains=rscpEscape
+syntax region rscpString start=/\v[rRbBuU]{1,2}'/ skip=/\\./ end=/'/ contains=rscpEscape
 " f-strings: the whole literal is a string; {holes} get expression highlighting
-syntax region rscpFString start=/\vf\"/ skip=/\\./ end=/"/ contains=rscpFInterp,rscpEscape
+syntax region rscpFString start=/\v[fF][rR]?"""/ end=/"""/ contains=rscpFInterp,rscpEscape
+syntax region rscpFString start=/\v[fF][rR]?"/ skip=/\\./ end=/"/ contains=rscpFInterp,rscpEscape
+syntax region rscpFString start=/\v[fF][rR]?'/ skip=/\\./ end=/'/ contains=rscpFInterp,rscpEscape
 syntax region rscpFInterp start=/{/ end=/}/ contained contains=rscpFInterp
 
-syntax match rscpEscape +\\[ntr0\\"']+ contained
+syntax match rscpEscape +\\[ntr0abfve\\"']\|\\x\x\x\|\\u{\x\{1,6}}+ contained
 
 " Numbers: hex, floats (but not the dots of a range), integers
 syntax match rscpNumber "\<0[xX][0-9a-fA-F_]\+\>"

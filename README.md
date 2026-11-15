@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.5.2.0 — enter statements, Ctrl-D to exit.
+rscp 2026.5.3.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.5.2.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.5.3.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -256,7 +256,7 @@ RSCP is dynamically typed with seven user-visible types:
 | `int`     | `42`, `0xFF`, `1_000`       | 64-bit, checked overflow                |
 | `float`   | `3.14`, `5.`, `.5`, `1e-3`  | 64-bit IEEE 754                         |
 | `bool`    | `true`, `false`             | the only accepted condition type        |
-| `string`  | `"hi\n"`                    | UTF-8, escapes `\n \t \r \0 \\ \" \'`   |
+| `string`  | `"hi"`, `'hi'`, `"""multi"""` | UTF-8; `f`/`r`/`b`/`u` prefixes; see below |
 | `array`   | `[1, 2, [3]]`               | reference type, any mix of values       |
 | `map`     | `{"a": 1, "b": [2]}`        | string keys, reference type             |
 | `function`| `fn(x) { return x; }`, `\|x\| x` | closures; see below               |
@@ -498,6 +498,24 @@ let s = "rscp" + "!"
 println(s[0], len(s), s == "rscp!")    # r 5 true
 ```
 
+Since 2026.5.3 strings come in Python-style literal forms: either quote
+style, triple-quoted multiline bodies, and 1-2 prefix letters:
+
+```rust
+let a = 'single quotes'
+let m = """line one
+line two"""                         # a real newline inside
+let win = r"C:\path\no\escape"   # raw: backslashes stay verbatim
+let bs = b"hi"                      # bytes: [104, 105], an array of UTF-8 bytes
+let u = u"plain"                    # u is a no-op (Python compatibility)
+println("\x41\u{1F600}")          # A😀 — \xNN and \u{...} escapes
+```
+
+The prefixes are `f` (interpolation), `r` (raw), `b` (bytes — the value is
+an array of UTF-8 byte values), `u` (no-op), and `f` combines with `r`:
+`fr"raw {x} \n stays"`. Escapes: `\n \t \r \0 \a \b \f \v \e`,
+`\xNN`, `\u{...}` (1-6 hex digits), `\\`, `\'`, `\"`.
+
 A toolbox of builtins covers the everyday operations — `upper`, `lower`,
 `trim`, `split`, `join`, `replace`, `contains` (works on arrays too),
 `starts_with`, `ends_with`, `find`, `repeat`, `ord`, `chr`, and `slice`,
@@ -706,7 +724,7 @@ cargo test
 * **57 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **98 golden cases** in `tests/cases/`: each program's exact stdout is
+* **100 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
@@ -751,13 +769,19 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.5.2` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.5.2.0`), release
+(`2026.5.3` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.5.3.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.5.3.0** — Python-style string literals. Single-quoted `'...'`;
+  triple-quoted multiline bodies; prefixes `r` (raw — backslashes stay
+  verbatim), `b` (bytes — the value is an array of UTF-8 byte values),
+  `u` (no-op compatibility prefix), combinable with `f`
+  (`fr"raw {x} \n stays"`); new escapes `\xNN`, `\u{...}`, `\a \b \f \v \e`.
+  58 unit tests, 100 golden cases.
 * **2026.5.2.0** — word logic and plain conditions. `and`, `or`, `not` are
   exact word forms of `&&`, `||`, `!` (same precedence; `not` binds as
   tightly as `!`). Parentheses around `if`/`while` conditions are now a

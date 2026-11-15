@@ -2,7 +2,9 @@
 //!
 //! Positions are 1-based. `line` advances on '\n'; `col` counts characters.
 //! Supported literals: integers (decimal, hex, `_` separators), floats
-//! (fractional part and/or exponent), and double-quoted strings with escapes.
+//! (fractional part and/or exponent), and strings — single- or
+//! double-quoted, with a triple-quoted multiline form and 1-2 prefix
+//! letters (f/r/b/u), plus `\xNN` and `\u{...}` escapes.
 //! Comments run from '#' to the end of the line — Python style, no block
 //! comments (since 2026.5.1).
 //!
@@ -11,7 +13,7 @@
 //! unless the next token cannot begin a new statement.
 
 use crate::errors::RscpError;
-use crate::token::{keyword, Lit, Token, TokenType};
+use crate::token::{keyword, FStrPart, Lit, Token, TokenType};
 
 /// Token types after which a newline terminates the statement
 /// (Go's semicolon insertion rule).
@@ -19,8 +21,8 @@ fn ends_statement(ty: TokenType) -> bool {
     use TokenType::*;
     matches!(
         ty,
-        Ident | Int | Float | Str | FStr | True | False | Null | Return | Break | Continue
-            | RParen | RBracket | RBrace | PlusPlus | MinusMinus
+        Ident | Int | Float | Str | Bytes | FStr | True | False | Null | Return | Break
+            | Continue | RParen | RBracket | RBrace | PlusPlus | MinusMinus
     )
 }
 
@@ -107,15 +109,9 @@ impl<'src> Lexer<'src> {
     /// Scan one non-trivia token: identifier, number, string or operator.
     fn scan_token(&mut self) -> Result<Token, RscpError> {
         match self.peek() {
-            Some(c) if c.is_ascii_alphabetic() || c == '_' => {
-                let t = self.identifier();
-                if t.ty == TokenType::Error {
-                    return Err(RscpError::lex(t.lexeme, t.line, t.col));
-                }
-                Ok(t)
-            }
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => self.identifier(),
             Some(c) if c.is_ascii_digit() => self.number(),
-            Some('"') => self.string(),
+            Some('"') | Some('\'') => self.string_literal(self.pos, self.line, self.col, ""),
             Some('.') if self.peek_second().map_or(false, |c| c.is_ascii_digit()) => self.number(),
             _ => self.operator(),
         }
@@ -128,9 +124,11 @@ impl<'src> Lexer<'src> {
     }
 
     fn peek_second(&self) -> Option<char> {
-        let mut it = self.src[self.pos..].chars();
-        it.next();
-        it.next()
+        self.src[self.pos..].chars().nth(1)
+    }
+
+    fn peek_third(&self) -> Option<char> {
+        self.src[self.pos..].chars().nth(2)
     }
 
     fn advance(&mut self) -> Option<char> {
@@ -166,7 +164,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn identifier(&mut self) -> Token {
+    fn identifier(&mut self) -> Result<Token, RscpError> {
         let (start, line, col) = (self.pos, self.line, self.col);
         while let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == '_' {
@@ -175,143 +173,284 @@ impl<'src> Lexer<'src> {
                 break;
             }
         }
-        // `f"…"` starts an f-string; a plain `f` is just an identifier.
-        if self.pos - start == 1 && self.src.as_bytes()[start] == b'f' && self.peek() == Some('"')
-        {
-            return self.fstring(start, line, col);
-        }
         let text = &self.src[start..self.pos];
+        // A 1-2 letter run of f/r/b/u directly before a quote starts a
+        // prefixed string literal: f"...", r'...', rb"...", u"..."
+        if (1..=2).contains(&text.len())
+            && text.chars().all(|c| matches!(c, 'f' | 'F' | 'r' | 'R' | 'b' | 'B' | 'u' | 'U'))
+            && matches!(self.peek(), Some('"' | '\''))
+        {
+            return self.string_literal(start, line, col, text);
+        }
         let ty = keyword(text).unwrap_or(TokenType::Ident);
-        self.tok(ty, start, line, col, None)
+        Ok(self.tok(ty, start, line, col, None))
     }
 
-    /// f"hello {name}, 1+1 = {1+1}" — a string with `{expression}` holes.
-    /// `{{` and `}}` are literal braces. The hole sources are kept raw and
-    /// re-lexed by the parser with corrected positions. Errors come back as
-    /// `TokenType::Error` tokens (the driver converts them).
-    fn fstring(&mut self, start: usize, line: usize, col: usize) -> Token {
-        use crate::token::FStrPart;
-        let err = |msg: &str, l: usize, c: usize| -> Token {
-            Token {
-                ty: TokenType::Error,
-                lexeme: msg.to_string(),
-                lit: None,
-                line: l,
-                col: c,
+    /// Parse a string prefix ("", "f", "rb", ...) into (raw, bytes, fstring).
+    /// `u` is a no-op compatibility prefix, like Python 3. Invalid
+    /// combinations (fb, uu, ...) return None.
+    fn string_flags(prefix: &str) -> Option<(bool, bool, bool)> {
+        let (mut raw, mut bytes, mut fstr) = (false, false, false);
+        for c in prefix.chars() {
+            match c {
+                'r' | 'R' if !raw => raw = true,
+                'f' | 'F' if !fstr => fstr = true,
+                'b' | 'B' if !bytes => bytes = true,
+                'u' | 'U' if !bytes => {}
+                _ => return None,
             }
+        }
+        if fstr && bytes {
+            return None; // f-bytes makes no sense
+        }
+        Some((raw, bytes, fstr))
+    }
+
+    /// Scan a string literal: `'...'` or `"..."`, a triple-quoted form for
+    /// multiline bodies, and 1-2 prefix letters from f/r/b/u. Raw strings
+    /// keep every backslash verbatim; bytes literals (b"...") carry their
+    /// UTF-8 byte values and become arrays at parse time.
+    fn string_literal(
+        &mut self,
+        start: usize,
+        line: usize,
+        col: usize,
+        prefix: &str,
+    ) -> Result<Token, RscpError> {
+        let (raw, bytes, fstr) = Self::string_flags(prefix)
+            .ok_or_else(|| RscpError::lex(format!("invalid string prefix '{prefix}'"), line, col))?;
+        let quote = self.peek().unwrap();
+        let triple = self.peek_second() == Some(quote) && self.peek_third() == Some(quote);
+        self.advance(); // the opening quote (first of 1-3)
+        if triple {
+            self.advance();
+            self.advance();
+        }
+        let unterminated = || {
+            let mut close = String::new();
+            for _ in 0..if triple { 3 } else { 1 } {
+                close.push(quote);
+            }
+            RscpError::lex(format!("unterminated string literal (missing '{close}')"), line, col)
         };
-        let unterminated = "unterminated f-string literal (missing '\"')";
-        self.advance(); // opening quote
         let mut parts: Vec<FStrPart> = Vec::new();
-        let mut lit = String::new();
+        let mut value = String::new();
         loop {
-            match self.peek() {
-                None | Some('\n') => return err(unterminated, line, col),
-                Some('"') => {
+            let c = match self.peek() {
+                None => return Err(unterminated()),
+                Some('\n') if !triple => return Err(unterminated()),
+                Some(c) => c,
+            };
+            // The closing quote (three in a row inside a triple-quoted body).
+            if c == quote {
+                if !triple {
                     self.advance();
-                    if !lit.is_empty() || parts.is_empty() {
-                        parts.push(FStrPart::Lit(std::mem::take(&mut lit)));
+                    return Ok(self.finish_string(start, line, col, bytes, fstr, parts, value));
+                }
+                if self.peek_second() == Some(quote) && self.peek_third() == Some(quote) {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    return Ok(self.finish_string(start, line, col, bytes, fstr, parts, value));
+                }
+                value.push(c);
+                self.advance();
+                continue;
+            }
+            // Escapes; raw strings keep the backslash and the next char.
+            if c == '\\' {
+                if raw {
+                    self.advance();
+                    match self.peek() {
+                        None => return Err(unterminated()),
+                        Some(e) => {
+                            value.push('\\');
+                            value.push(e);
+                            self.advance();
+                        }
                     }
-                    return self.tok(TokenType::FStr, start, line, col, Some(Lit::FStr(parts)));
+                    continue;
                 }
-                Some('{') if self.peek_second() == Some('{') => {
+                let (el, ec) = (self.line, self.col);
+                self.advance(); // the backslash
+                value.push(self.scan_escape(el, ec)?);
+                continue;
+            }
+            // f-string holes: {expr}, with {{ and }} as literal braces.
+            if fstr && c == '{' {
+                if self.peek_second() == Some('{') {
                     self.advance();
                     self.advance();
-                    lit.push('{');
+                    value.push('{');
+                    continue;
                 }
-                Some('}') if self.peek_second() == Some('}') => {
-                    self.advance();
-                    self.advance();
-                    lit.push('}');
+                if !value.is_empty() {
+                    parts.push(FStrPart::Lit(std::mem::take(&mut value)));
                 }
-                Some('{') => {
-                    // Collect the raw expression source until the matching
-                    // '}', tracking brace nesting and copying nested strings
-                    // verbatim so the re-lexer sees them.
-                    if !lit.is_empty() {
-                        parts.push(FStrPart::Lit(std::mem::take(&mut lit)));
-                    }
-                    let (eline, ecol) = (self.line, self.col + 1);
-                    self.advance(); // '{'
-                    let expr_start = self.pos;
-                    let mut depth = 1usize;
-                    loop {
-                        match self.peek() {
-                            None | Some('\n') => {
-                                return err("unterminated '{' in f-string (missing '}')", line, col);
+                let (eline, ecol) = (self.line, self.col + 1);
+                self.advance(); // '{'
+                let expr_start = self.pos;
+                let mut depth = 1usize;
+                loop {
+                    match self.peek() {
+                        None | Some('\n') if !triple => {
+                            return Err(RscpError::lex(
+                                "unterminated '{' in f-string (missing '}')",
+                                line,
+                                col,
+                            ))
+                        }
+                        None => return Err(unterminated()),
+                        Some('{') => {
+                            depth += 1;
+                            self.advance();
+                        }
+                        Some('}') => {
+                            depth -= 1;
+                            self.advance();
+                            if depth == 0 {
+                                break;
                             }
-                            Some('{') => {
-                                depth += 1;
-                                self.advance();
-                            }
-                            Some('}') => {
-                                depth -= 1;
-                                self.advance();
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            Some('"') => {
-                                self.advance();
-                                loop {
-                                    match self.peek() {
-                                        Some('\\') => {
-                                            self.advance();
-                                            self.advance();
-                                        }
-                                        Some('"') => {
-                                            self.advance();
-                                            break;
-                                        }
-                                        Some('\n') | None => {
-                                            return err(
-                                                "unterminated string inside f-string",
-                                                line,
-                                                col,
-                                            );
-                                        }
-                                        Some(_) => {
-                                            self.advance();
-                                        }
+                        }
+                        // Copy nested string literals inside the hole verbatim
+                        // (either quote style, escapes skipped) so the re-lexer
+                        // sees them whole.
+                        Some('"') | Some('\'') => {
+                            let q = self.peek().unwrap();
+                            self.advance();
+                            loop {
+                                match self.peek() {
+                                    Some('\\') => {
+                                        self.advance();
+                                        self.advance();
+                                    }
+                                    Some(c) if c == q => {
+                                        self.advance();
+                                        break;
+                                    }
+                                    Some('\n') | None => {
+                                        return Err(RscpError::lex(
+                                            "unterminated string inside f-string",
+                                            line,
+                                            col,
+                                        ))
+                                    }
+                                    Some(_) => {
+                                        self.advance();
                                     }
                                 }
                             }
-                            Some(_) => {
-                                self.advance();
-                            }
+                        }
+                        Some(_) => {
+                            self.advance();
                         }
                     }
-                    let src = self.src[expr_start..self.pos - 1].trim().to_string();
-                    if src.is_empty() {
-                        return err("empty '{}' expression in f-string", eline, ecol);
-                    }
-                    parts.push(FStrPart::Expr(src, eline, ecol));
                 }
-                Some('\\') => {
-                    let (el, ec) = (self.line, self.col);
-                    self.advance();
-                    let escaped = match self.advance() {
-                        Some('n') => '\n',
-                        Some('t') => '\t',
-                        Some('r') => '\r',
-                        Some('0') => '\0',
-                        Some('\\') => '\\',
-                        Some('"') => '"',
-                        Some('\'') => '\'',
-                        Some(other) => {
-                            return err(&format!("unknown escape sequence '\\{other}'"), el, ec);
-                        }
-                        None => return err(unterminated, line, col),
-                    };
-                    lit.push(escaped);
+                let src = self.src[expr_start..self.pos - 1].trim().to_string();
+                if src.is_empty() {
+                    return Err(RscpError::lex("empty '{}' expression in f-string", eline, ecol));
                 }
-                Some(_) => {
-                    lit.push(self.advance().unwrap());
-                }
+                parts.push(FStrPart::Expr(src, eline, ecol));
+                continue;
             }
+            if fstr && c == '}' && self.peek_second() == Some('}') {
+                self.advance();
+                self.advance();
+                value.push('}');
+                continue;
+            }
+            value.push(c);
+            self.advance();
         }
     }
 
+    /// Build the token for a finished string body.
+    fn finish_string(
+        &self,
+        start: usize,
+        line: usize,
+        col: usize,
+        bytes: bool,
+        fstr: bool,
+        mut parts: Vec<FStrPart>,
+        value: String,
+    ) -> Token {
+        if fstr {
+            if value.is_empty() && parts.is_empty() {
+                parts.push(FStrPart::Lit(String::new()));
+            } else if !value.is_empty() {
+                parts.push(FStrPart::Lit(value));
+            }
+            self.tok(TokenType::FStr, start, line, col, Some(Lit::FStr(parts)))
+        } else if bytes {
+            self.tok(
+                TokenType::Bytes,
+                start,
+                line,
+                col,
+                Some(Lit::Bytes(value.as_bytes().to_vec())),
+            )
+        } else {
+            self.tok(TokenType::Str, start, line, col, Some(Lit::Str(value)))
+        }
+    }
+
+    /// Decode one escape sequence; the leading backslash is consumed.
+    fn scan_escape(&mut self, el: usize, ec: usize) -> Result<char, RscpError> {
+        let err = |m: String| Err(RscpError::lex(m, el, ec));
+        match self.advance() {
+            Some('n') => Ok('\n'),
+            Some('t') => Ok('\t'),
+            Some('r') => Ok('\r'),
+            Some('0') => Ok('\0'),
+            Some('a') => Ok('\u{7}'),
+            Some('b') => Ok('\u{8}'),
+            Some('f') => Ok('\u{c}'),
+            Some('v') => Ok('\u{b}'),
+            Some('e') => Ok('\u{1b}'),
+            Some('\\') => Ok('\\'),
+            Some('\'') => Ok('\''),
+            Some('"') => Ok('"'),
+            Some('x') => {
+                let mut v = 0u32;
+                for _ in 0..2 {
+                    match self.peek() {
+                        Some(c) if c.is_ascii_hexdigit() => {
+                            v = v * 16 + c.to_digit(16).unwrap();
+                            self.advance();
+                        }
+                        _ => return err("\\x needs two hex digits, as in \\x41".to_string()),
+                    }
+                }
+                Ok(char::from_u32(v).unwrap())
+            }
+            Some('u') => {
+                if self.peek() != Some('{') {
+                    return err("\\u needs braces with 1-6 hex digits, as in \\u{1F600}".to_string());
+                }
+                self.advance(); // {
+                let mut v = 0u32;
+                let mut n = 0;
+                while let Some(c) = self.peek().filter(|c| c.is_ascii_hexdigit()) {
+                    v = v * 16 + c.to_digit(16).unwrap();
+                    n += 1;
+                    if n > 6 {
+                        return err("\\u{...} needs 1-6 hex digits".to_string());
+                    }
+                    self.advance();
+                }
+                if n == 0 || self.peek() != Some('}') {
+                    return err("\\u{...} needs 1-6 hex digits".to_string());
+                }
+                self.advance(); // }
+                char::from_u32(v).ok_or_else(|| {
+                    RscpError::lex(format!("\\u{{{v:x}}} is not a valid Unicode character"), el, ec)
+                })
+            }
+            Some(other) => err(format!("unknown escape sequence '\\{other}'")),
+            None => err("unterminated string literal".to_string()),
+        }
+    }
     fn number(&mut self) -> Result<Token, RscpError> {
         let (start, line, col) = (self.pos, self.line, self.col);
 
@@ -438,57 +577,6 @@ impl<'src> Lexer<'src> {
         matches!(self.peek(), Some(c) if c.is_ascii_alphabetic() || c == '_')
     }
 
-    fn string(&mut self) -> Result<Token, RscpError> {
-        let (start, line, col) = (self.pos, self.line, self.col);
-        self.advance(); // opening quote
-        let mut value = String::new();
-        loop {
-            match self.peek() {
-                None | Some('\n') => {
-                    return Err(RscpError::lex(
-                        "unterminated string literal (missing '\"')",
-                        line,
-                        col,
-                    ))
-                }
-                Some('"') => {
-                    self.advance();
-                    return Ok(self.tok(TokenType::Str, start, line, col, Some(Lit::Str(value))));
-                }
-                Some('\\') => {
-                    let (el, ec) = (self.line, self.col);
-                    self.advance();
-                    let escaped = match self.advance() {
-                        Some('n') => '\n',
-                        Some('t') => '\t',
-                        Some('r') => '\r',
-                        Some('0') => '\0',
-                        Some('\\') => '\\',
-                        Some('"') => '"',
-                        Some('\'') => '\'',
-                        Some(other) => {
-                            return Err(RscpError::lex(
-                                format!("unknown escape sequence '\\{other}'"),
-                                el,
-                                ec,
-                            ))
-                        }
-                        None => {
-                            return Err(RscpError::lex(
-                                "unterminated string literal (missing '\"')",
-                                line,
-                                col,
-                            ))
-                        }
-                    };
-                    value.push(escaped);
-                }
-                Some(_) => {
-                    value.push(self.advance().unwrap());
-                }
-            }
-        }
-    }
 
     fn operator(&mut self) -> Result<Token, RscpError> {
         use TokenType::*;
@@ -732,6 +820,7 @@ mod tests {
                 Lit::Int(i) => format!("i{i}"),
                 Lit::Float(f) => format!("f{f:?}"),
                 Lit::Str(s) => format!("s{s}"),
+                Lit::Bytes(_) => "bs".to_string(),
                 Lit::FStr(_) => "fs".to_string(),
             })
             .collect();
@@ -751,6 +840,48 @@ mod tests {
             Some(Lit::Str(s)) => assert_eq!(s, "a\nb\t\\ \"c\" \0\r"),
             other => panic!("bad lit: {other:?}"),
         }
+        // Single quotes (2026.5.3); either quote can host the other one.
+        let ts = lex("'a \"b\" \\n\\'c\\''");
+        match &ts[0].lit {
+            Some(Lit::Str(s)) => assert_eq!(s, "a \"b\" \n'c'"),
+            other => panic!("bad lit: {other:?}"),
+        }
+        // The new 2026.5.3 escapes: \xNN, \u{...}, \a \b \f \v \e.
+        let ts = lex("\"\\x41\\u{1F600}\\a\\b\\f\\v\\e\"");
+        match &ts[0].lit {
+            Some(Lit::Str(s)) => assert_eq!(s, "A\u{1F600}\u{7}\u{8}\u{c}\u{b}\u{1b}"),
+            other => panic!("bad lit: {other:?}"),
+        }
+        // Raw strings keep backslashes; u is a no-op compatibility prefix.
+        let ts = lex("r\"a\\nb\" u'x\\ty' R\"q\"");
+        match &ts[0].lit {
+            Some(Lit::Str(s)) => assert_eq!(s, "a\\nb"),
+            other => panic!("bad lit: {other:?}"),
+        }
+        match &ts[1].lit {
+            Some(Lit::Str(s)) => assert_eq!(s, "x\ty"), // u is a no-op: \t is a real tab
+            other => panic!("bad lit: {other:?}"),
+        }
+        match &ts[2].lit {
+            Some(Lit::Str(s)) => assert_eq!(s, "q"), // R"q" — raw, uppercase prefix
+            other => panic!("bad lit: {other:?}"),
+        }
+        // Bytes carry UTF-8 byte values.
+        let ts = lex("b\"hi\"");
+        match &ts[0].lit {
+            Some(Lit::Bytes(b)) => assert_eq!(b, &[104, 105]),
+            other => panic!("bad lit: {other:?}"),
+        }
+        // Triple-quoted strings span lines.
+        let ts = lex("\"\"\"a\nb\n\"\"\"");
+        match &ts[0].lit {
+            Some(Lit::Str(s)) => assert_eq!(s, "a\nb\n"),
+            other => panic!("bad lit: {other:?}"),
+        }
+        // f-strings: prefix letters combine (fr), either quote style.
+        let ts = lex("f'{n}' fr\"x\"");
+        assert_eq!(ts[0].ty, FStr);
+        assert_eq!(ts[1].ty, FStr);
     }
 
     #[test]
@@ -856,6 +987,12 @@ mod tests {
         assert!(Lexer::new("\"unterminated").tokenize().is_err());
         assert!(Lexer::new("\"bad \\q escape\"").tokenize().is_err());
         assert!(Lexer::new("# a comment is never a lex error").tokenize().is_ok());
+        assert!(Lexer::new("'unterminated").tokenize().is_err());
+        assert!(Lexer::new("\"\"\"never closed").tokenize().is_err());
+        assert!(Lexer::new("\"\\x4\"").tokenize().is_err()); // \x needs two hex digits
+        assert!(Lexer::new("\"\\u{}\"").tokenize().is_err());
+        assert!(Lexer::new("\"\\u{110000}\"").tokenize().is_err()); // out of Unicode range
+        assert!(Lexer::new("fb\"x\"").tokenize().is_err()); // f and b cannot combine
         assert!(Lexer::new("let a = $;").tokenize().is_err());
         assert!(Lexer::new("0x").tokenize().is_err());
         assert!(Lexer::new("0b").tokenize().is_err());
