@@ -705,7 +705,9 @@ impl Vm {
                         };
                         match v {
                             Some(v) => self.stack[base + dst] = v,
-                            None => rt!(op_ip, "internal error: EnumBind on a value without that payload"),
+                            None => rtc!(op_ip, "TYPE",
+                            "match: the enum value does not carry an array payload (was the value modified?)"
+                        ),
                         }
                     }
                     Op::JumpIfFalsePeek | Op::JumpIfTruePeek => {
