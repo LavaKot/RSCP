@@ -1056,6 +1056,19 @@ impl Compiler {
                 self.emit(Op::IndexGet, e.line, e.col);
                 self.drop_temps(1);
             }
+            ExprKind::Slice { obj, start, end, step } => {
+                self.expr(obj)?;
+                for part in [start.as_deref(), end.as_deref(), step.as_deref()] {
+                    match part {
+                        Some(p) => self.expr(p)?,
+                        None => {
+                            self.emit(Op::Null, e.line, e.col);
+                        }
+                    }
+                }
+                self.emit(Op::SliceGet, e.line, e.col);
+                self.drop_temps(3);
+            }
             ExprKind::Range { .. } => {
                 return Err(self.err(
                     "a range ('a..b') can only be the iterable of a 'for' loop",

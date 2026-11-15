@@ -1,0 +1,12 @@
+# Python-style slices and negative indexes (2026.5.4)
+let a = [0, 1, 2, 3, 4, 5]
+println(a[1:3])
+println(a[:2], a[4:], a[:])
+println(a[::2], a[1:5:2])
+println(a[::-1], a[3::-1])
+println(a[-1], a[-2], "abcdef"[-1])
+println("abcdef"[1:4], "abcdef"[::-1], "abcdef"[-4:-1])
+println(a[10:20], a[-10:2], a[2:1])
+var m = {"k": [10, 20, 30]}
+m.k[1] = 99
+println(m.k[-2], m["k"][::-1])

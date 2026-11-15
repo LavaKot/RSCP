@@ -67,6 +67,8 @@ pub enum Op {
     IndexGet,
     /// obj[idx] = value (pop value, idx, obj)
     IndexSet,
+    /// obj[start:end:step] (pop step, end, start, obj; push the slice)
+    SliceGet,
     /// like IndexGet but keeps obj and idx on the stack (compound assignment)
     IndexGetKeep,
     /// len(array) — used by `for-in`
@@ -97,7 +99,7 @@ pub enum Op {
     Import,
 }
 
-const ALL_OPS: [Op; 53] = [
+const ALL_OPS: [Op; 54] = [
     Op::Constant,
     Op::Null,
     Op::True,
@@ -135,6 +137,7 @@ const ALL_OPS: [Op; 53] = [
     Op::Map,
     Op::IndexGet,
     Op::IndexSet,
+    Op::SliceGet,
     Op::IndexGetKeep,
     Op::ArrayLen,
     Op::BitAnd,
@@ -197,6 +200,7 @@ impl Op {
             Op::Map => "Map",
             Op::IndexGet => "IndexGet",
             Op::IndexSet => "IndexSet",
+            Op::SliceGet => "SliceGet",
             Op::IndexGetKeep => "IndexGetKeep",
             Op::ArrayLen => "ArrayLen",
             Op::BitAnd => "BitAnd",

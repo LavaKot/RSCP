@@ -535,6 +535,16 @@ impl Vm {
                             Err(msg) => rt!(op_ip, msg),
                         }
                     }
+                    Op::SliceGet => {
+                        let step = self.stack.pop().unwrap();
+                        let end = self.stack.pop().unwrap();
+                        let start = self.stack.pop().unwrap();
+                        let obj = self.stack.pop().unwrap();
+                        match slice_get(obj, start, end, step) {
+                            Ok(v) => self.stack.push(v),
+                            Err(msg) => rt!(op_ip, msg),
+                        }
+                    }
                     Op::IndexGetKeep => {
                         // obj and idx stay on the stack; the element is
                         // pushed on top (compound assignment support).
@@ -918,14 +928,17 @@ fn bitwise(op: Op, lhs: Value, rhs: Value) -> Result<Value, String> {
 }
 
 /// Index read: array[int], map[string], string[int] (char index).
+/// Negative indexes count from the end: a[-1] is the last element.
 fn index_get(obj: Value, idx: Value) -> Result<Value, String> {
     match (obj, idx) {
         (Value::Array(a), Value::Int(i)) => {
             let items = a.borrow();
-            if i < 0 || i as usize >= items.len() {
-                return Err(format!("index {i} out of bounds for array of length {}", items.len()));
+            let len = items.len() as i64;
+            let at = if i < 0 { i + len } else { i };
+            if at < 0 || at >= len {
+                return Err(format!("index {i} out of bounds for array of length {len}"));
             }
-            Ok(items[i as usize].clone())
+            Ok(items[at as usize].clone())
         }
         (Value::Map(m), Value::Str(k)) => match m.borrow().get(&*k) {
             Some(v) => Ok(v.clone()),
@@ -933,10 +946,11 @@ fn index_get(obj: Value, idx: Value) -> Result<Value, String> {
         },
         (Value::Str(s), Value::Int(i)) => {
             let len = s.chars().count() as i64;
-            if i < 0 || i >= len {
+            let at = if i < 0 { i + len } else { i };
+            if at < 0 || at >= len {
                 return Err(format!("index {i} out of bounds for string of length {len}"));
             }
-            let ch = s.chars().nth(i as usize).unwrap();
+            let ch = s.chars().nth(at as usize).unwrap();
             Ok(Value::str(ch.to_string()))
         }
         (obj, idx) => Err(format!(
@@ -947,15 +961,18 @@ fn index_get(obj: Value, idx: Value) -> Result<Value, String> {
     }
 }
 
-/// Index write: array[int] and map[string].
+/// Index write: array[int] and map[string]. Negative indexes count from
+/// the end, like the reads.
 fn index_set(obj: Value, idx: Value, value: Value) -> Result<(), String> {
     match (obj, idx) {
         (Value::Array(a), Value::Int(i)) => {
             let mut items = a.borrow_mut();
-            if i < 0 || i as usize >= items.len() {
-                return Err(format!("index {i} out of bounds for array of length {}", items.len()));
+            let len = items.len() as i64;
+            let at = if i < 0 { i + len } else { i };
+            if at < 0 || at >= len {
+                return Err(format!("index {i} out of bounds for array of length {len}"));
             }
-            items[i as usize] = value;
+            items[at as usize] = value;
             Ok(())
         }
         (Value::Map(m), Value::Str(k)) => {
@@ -967,6 +984,63 @@ fn index_set(obj: Value, idx: Value, value: Value) -> Result<(), String> {
             obj.type_name(),
             idx.type_name()
         )),
+    }
+}
+
+/// Python-style slicing: obj[start:end:step] on arrays and strings.
+/// Omitted bounds arrive as Null, negative bounds count from the end,
+/// a zero step is an error, and a negative step walks backwards
+/// (CPython's slice.indices rules, including the -1 stop sentinel).
+fn slice_get(obj: Value, start: Value, end: Value, step: Value) -> Result<Value, String> {
+    let step = match step {
+        Value::Null => 1,
+        Value::Int(0) => return Err("slice step cannot be zero".to_string()),
+        Value::Int(i) => i,
+        v => return Err(format!("slice step must be an int, got {}", v.type_name())),
+    };
+    let len: i64 = match &obj {
+        Value::Array(a) => a.borrow().len() as i64,
+        Value::Str(s) => s.chars().count() as i64,
+        o => return Err(format!("cannot slice {}", o.type_name())),
+    };
+    let resolve = |v: Value, default: i64| -> Result<i64, String> {
+        match v {
+            Value::Null => Ok(default),
+            Value::Int(i) => Ok(if i < 0 { i + len } else { i }),
+            o => Err(format!("slice bounds must be ints, got {}", o.type_name())),
+        }
+    };
+    let mut idxs: Vec<usize> = Vec::new();
+    if step > 0 {
+        let s = resolve(start, 0)?.clamp(0, len);
+        let e = resolve(end, len)?.clamp(0, len);
+        let mut i = s;
+        while i < e {
+            idxs.push(i as usize);
+            i += step;
+        }
+    } else {
+        // Backwards: the default start is the last element and the default
+        // stop sits just before the first (index -1).
+        let s = resolve(start, len - 1)?.clamp(-1, len - 1);
+        let e = resolve(end, -1)?.clamp(-1, len - 1);
+        let mut i = s;
+        while i > e {
+            idxs.push(i as usize);
+            i += step;
+        }
+    }
+    match obj {
+        Value::Array(a) => {
+            let items = a.borrow();
+            let out = idxs.into_iter().map(|i| items[i].clone()).collect();
+            Ok(Value::Array(Rc::new(RefCell::new(out))))
+        }
+        Value::Str(s) => {
+            let out: String = idxs.into_iter().map(|i| s.chars().nth(i).unwrap()).collect();
+            Ok(Value::str(out))
+        }
+        o => Err(format!("cannot slice {}", o.type_name())),
     }
 }
 

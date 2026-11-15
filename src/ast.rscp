@@ -159,6 +159,13 @@ pub enum ExprKind {
     FStr(Vec<FStrPart>),
     Call { callee: Box<Expr>, args: Vec<Expr> },
     Index { obj: Box<Expr>, idx: Box<Expr> },
+    /// obj[start:end:step] — Python-style; any part may be absent.
+    Slice {
+        obj: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
+    },
     /// `start..end` (exclusive) or `start..=end` (inclusive).
     /// Only valid as the iterable of a `for` loop.
     Range { start: Box<Expr>, end: Box<Expr>, inclusive: bool },

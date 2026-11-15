@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.5.3.0 — enter statements, Ctrl-D to exit.
+rscp 2026.5.4.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.5.3.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.5.4.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -516,6 +516,21 @@ an array of UTF-8 byte values), `u` (no-op), and `f` combines with `r`:
 `fr"raw {x} \n stays"`. Escapes: `\n \t \r \0 \a \b \f \v \e`,
 `\xNN`, `\u{...}` (1-6 hex digits), `\\`, `\'`, `\"`.
 
+
+**Slices** (2026.5.4) live directly in the index brackets, Python style —
+any part optional, negative bounds count from the end, a negative step
+walks backwards — and they cut arrays and strings alike:
+
+```rust
+let a = [0, 1, 2, 3, 4, 5]
+println(a[1:3], a[::2], a[::-1], a[-1])   # [1, 2] [0, 2, 4] [5, 4, 3, 2, 1, 0] 5
+println("abcdef"[1:4], "abcdef"[-4:-1])   # bcd cde
+```
+
+Plain indexing understands negatives too: `a[-1]` is the last element and
+`a[-1] = 9` writes it (out of range is still an error). The `slice(x, a, b)`
+builtin stays for the two-argument form.
+
 A toolbox of builtins covers the everyday operations — `upper`, `lower`,
 `trim`, `split`, `join`, `replace`, `contains` (works on arrays too),
 `starts_with`, `ends_with`, `find`, `repeat`, `ord`, `chr`, and `slice`,
@@ -676,7 +691,7 @@ source (.rscp) ──► lexer ──► parser ──► compiler ──► byt
 | `src/ast.rscp`    | expression/statement tree |
 | `src/parser.rscp` | recursive descent + precedence climbing |
 | `src/errors.rscp` | unified error type, source-annotated rendering |
-| `src/bytecode.rscp` | 39 opcodes, chunks, prototypes, disassembler |
+| `src/bytecode.rscp` | 54 opcodes, chunks, prototypes, disassembler |
 | `src/compiler.rscp` | AST → bytecode; locals, upvalue capture, loop patching |
 | `src/value.rscp`  | runtime values (`Rc`/`RefCell` reference types) |
 | `src/vm.rscp`     | stack machine: frames, call stack, upvalue closing |
@@ -686,7 +701,7 @@ source (.rscp) ──► lexer ──► parser ──► compiler ──► byt
 Design highlights:
 
 * **Bytecode, not tree-walking.** Programs compile once into a `Chunk` of
-  46 one-byte opcodes (with `u8`/`u16` operands); the VM is a tight dispatch
+  54 one-byte opcodes (with `u8`/`u16` operands); the VM is a tight dispatch
   loop over call frames. `for i in 0..n` compiles to a counted loop — no
   array is built (same speed as the legacy C-style `for`), and `match`
   compiles to a jump chain — no allocations.
@@ -724,7 +739,7 @@ cargo test
 * **57 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **100 golden cases** in `tests/cases/`: each program's exact stdout is
+* **102 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
@@ -745,6 +760,7 @@ cargo test
 | lambdas | `lambda x: x` | `\|x\| x` | `\|x\| x` |
 | loops | `for i in range(n)` | `for i in 0..n` | `for i in 0..n` |
 | infinite loop | `while True:` | `loop { }` | `loop { }` |
+| slices | `a[1:3]`, `a[::-1]` | `&a[1..3]` | `a[1:3]`, `a[::-1]` |
 | branching | `match` (3.10+) | `match` | `match` (expression, with guards and ranges) |
 | bitwise | `\| & ^ << >>` | `\| & ^ ! << >>` | `\| & ^ ~ << >>` (Rust precedence) |
 | types | dynamic | static, inferred | dynamic |
@@ -769,13 +785,19 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.5.3` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.5.3.0`), release
+(`2026.5.4` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.5.4.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.5.4.0** — slices and negative indexes, Python style.
+  `a[start:end:step]` right in the index brackets (any part optional,
+  negative bounds count from the end, a negative step walks backwards —
+  CPython's rules) on arrays and strings; plain indexing understands
+  negatives too: `a[-1]` is the last element, `a[-1] = 9` writes it.
+  New `SliceGet` opcode. 59 unit tests, 102 golden cases.
 * **2026.5.3.0** — Python-style string literals. Single-quoted `'...'`;
   triple-quoted multiline bodies; prefixes `r` (raw — backslashes stay
   verbatim), `b` (bytes — the value is an array of UTF-8 byte values),

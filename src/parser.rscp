@@ -1001,13 +1001,57 @@ impl Parser {
                 }
                 TokenType::LBracket => {
                     let tok = self.advance();
-                    let idx = self.expression()?;
-                    self.expect(TokenType::RBracket, "']' after index")?;
-                    expr = Expr::new(
-                        ExprKind::Index { obj: Box::new(expr), idx: Box::new(idx) },
-                        tok.line,
-                        tok.col,
-                    );
+                    // Python-style slices (2026.5.4): a[start:end[:step]],
+                    // any part optional. A lone expression is a plain index;
+                    // the ternary's ':' is consumed inside expression().
+                    let start = if self.check(TokenType::Colon) || self.check(TokenType::RBracket) {
+                        None
+                    } else {
+                        Some(self.expression()?)
+                    };
+                    if self.match_ty(TokenType::Colon).is_some() {
+                        let end =
+                            if self.check(TokenType::Colon) || self.check(TokenType::RBracket) {
+                                None
+                            } else {
+                                Some(self.expression()?)
+                            };
+                        let step = if self.match_ty(TokenType::Colon).is_some() {
+                            if self.check(TokenType::RBracket) {
+                                None
+                            } else {
+                                Some(self.expression()?)
+                            }
+                        } else {
+                            None
+                        };
+                        self.expect(TokenType::RBracket, "']' after the slice")?;
+                        expr = Expr::new(
+                            ExprKind::Slice {
+                                obj: Box::new(expr),
+                                start: start.map(Box::new),
+                                end: end.map(Box::new),
+                                step: step.map(Box::new),
+                            },
+                            tok.line,
+                            tok.col,
+                        );
+                    } else {
+                        let idx = match start {
+                            Some(e) => e,
+                            None => {
+                                return Err(self.error_here(
+                                    "an index or a slice between '[' and ']'",
+                                ))
+                            }
+                        };
+                        self.expect(TokenType::RBracket, "']' after index")?;
+                        expr = Expr::new(
+                            ExprKind::Index { obj: Box::new(expr), idx: Box::new(idx) },
+                            tok.line,
+                            tok.col,
+                        );
+                    }
                 }
                 // `m.key` — sugar for `m["key"]`.
                 TokenType::Dot => {
@@ -1719,5 +1763,26 @@ fn f(
         let stmts = parse("if not done { break }");
         assert!(matches!(&stmts[0].kind, StmtKind::If { cond, .. }
             if matches!(cond.kind, ExprKind::Unary { op: UnaryOp::Not, .. })));
+    }
+
+    #[test]
+    fn slice_shapes() {
+        // Python-style slices (2026.5.4); a lone expression stays an index.
+        let stmts = parse(
+            "let a = x[1:3]\nlet b = x[1:]\nlet c = x[:2]\nlet d = x[:]\nlet e = x[::2]\nlet f = x[1:5:2]\nlet g = x[-1]\nlet h = x[k ? 1 : 2]",
+        );
+        let init = |i: usize| match &stmts[i].kind {
+            StmtKind::Let { init, .. } => init.kind.clone(),
+            other => panic!("bad stmt: {other:?}"),
+        };
+        assert!(matches!(init(0), ExprKind::Slice { start: Some(_), end: Some(_), step: None, .. }));
+        assert!(matches!(init(1), ExprKind::Slice { start: Some(_), end: None, step: None, .. }));
+        assert!(matches!(init(2), ExprKind::Slice { start: None, end: Some(_), step: None, .. }));
+        assert!(matches!(init(3), ExprKind::Slice { start: None, end: None, step: None, .. }));
+        assert!(matches!(init(4), ExprKind::Slice { start: None, end: None, step: Some(_), .. }));
+        assert!(matches!(init(5), ExprKind::Slice { start: Some(_), end: Some(_), step: Some(_), .. }));
+        assert!(matches!(init(6), ExprKind::Index { .. }));
+        // The ternary's ':' is consumed inside the expression, not a slice.
+        assert!(matches!(init(7), ExprKind::Index { idx, .. } if matches!(idx.kind, ExprKind::Ternary { .. })));
     }
 }
