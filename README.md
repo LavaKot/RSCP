@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.14 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.15 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.14.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.15.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,7 +304,7 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So the current release is `26.0.12.3` (`v26.0.12.14`); a hotfix on top of
+So the current release is `26.0.12.3` (`v26.0.12.15`); a hotfix on top of
 it would be `26.0.12.4`, and the next feature release `26.0.13.0`. While
 the second number is `0`, GitHub releases are titled **"Beta …"** (e.g.
 "Beta 26.0.12.3"); from the first stable release the prefix disappears.
@@ -318,6 +318,16 @@ README.
 
 ## Changelog
 
+* **26.0.12.15** — the REPL remembers enums and classes across lines.
+  `enum E { A, B(x) }` on one line then `match E.B(5) { E.A => 0,
+  E.B(x) => x }` on the next used to fail with "unknown enum 'E'
+  (enums must be declared in the same file as the match)" — every line
+  compiled as its own unit. A per-session registry now seeds match
+  patterns, exhaustiveness checks and `self.x` field checks; redefining
+  an enum on a later line still replaces it. Also: Ctrl-D inside an
+  unfinished construct now says "input ended inside an incomplete
+  construct; N line(s) discarded" instead of dropping the buffer
+  silently. Found by `scripts/recon3.py` (repl blocks).
 * **26.0.12.14** — corrupting an enum value's payload (`e["args"] = 5`)
   and then destructuring it in a `match` reported "internal error:
   EnumBind on a value without that payload". No internal state is

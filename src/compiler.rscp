@@ -85,7 +85,63 @@ struct LoopCtx {
 /// Compile a program into the script prototype. `base_dir` is the
 /// directory of the source file; `import` paths resolve against it.
 pub fn compile(program: &[Stmt], base_dir: &Path) -> Result<Rc<FnProto>, RscpError> {
-    compile_in_chain(program, base_dir, Vec::new(), "<script>".to_string())
+    compile_in_chain(
+        program,
+        base_dir,
+        Vec::new(),
+        "<script>".to_string(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+}
+
+/// Declarations accumulated over a REPL session: enums and classes
+/// declared on earlier lines stay visible to `match` patterns and
+/// `self.x` field checks on later lines (26.0.12.15).
+#[derive(Default)]
+pub struct SessionDecls {
+    pub enums: HashMap<String, Vec<(String, usize)>>,
+    pub classes: HashMap<String, (Option<String>, Vec<String>, Vec<String>)>,
+}
+
+/// Compile one REPL line seeded with the session's declarations; newly
+/// declared enums/classes are merged back (redefinition overwrites, so
+/// `enum E { ... }` on a later line replaces the earlier shape).
+pub fn compile_session(
+    program: &[Stmt],
+    base_dir: &Path,
+    session: &mut SessionDecls,
+) -> Result<Rc<FnProto>, RscpError> {
+    let proto = compile_in_chain(
+        program,
+        base_dir,
+        Vec::new(),
+        "<script>".to_string(),
+        session.enums.clone(),
+        session.classes.clone(),
+    )?;
+    for s in program {
+        match &s.kind {
+            StmtKind::Enum { name, variants } => {
+                session.enums.insert(
+                    name.clone(),
+                    variants.iter().map(|(n, p)| (n.clone(), p.len())).collect(),
+                );
+            }
+            StmtKind::Class { name, parent, fields, methods } => {
+                session.classes.insert(
+                    name.clone(),
+                    (
+                        parent.clone(),
+                        fields.clone(),
+                        methods.iter().map(|(n, _)| n.clone()).collect(),
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(proto)
 }
 
 /// Compile a module (or the script, with an empty chain). The chain holds
@@ -96,6 +152,8 @@ fn compile_in_chain(
     base_dir: &Path,
     chain: Vec<PathBuf>,
     proto_name: String,
+    mut seed_enums: HashMap<String, Vec<(String, usize)>>,
+    mut seed_classes: HashMap<String, (Option<String>, Vec<String>, Vec<String>)>,
 ) -> Result<Rc<FnProto>, RscpError> {
     let mut c = Compiler {
         fns: vec![FnCtx {
@@ -122,7 +180,9 @@ fn compile_in_chain(
         top_names: Vec::new(),
         temp_n: 0,
         enums: HashMap::new(),
+        session_enums: std::mem::take(&mut seed_enums),
         classes: HashMap::new(),
+        session_classes: std::mem::take(&mut seed_classes),
         method_check: None,
         base_dir: base_dir.to_path_buf(),
         chain,
@@ -149,10 +209,16 @@ struct Compiler {
     /// Patterns and exhaustiveness checks only see same-file enums —
     /// imports resolve at runtime (26.0.11.0).
     enums: HashMap<String, Vec<(String, usize)>>,
+    /// Enums declared on EARLIER REPL lines (26.0.12.15): a lookup
+    /// fallback for match patterns, never a redeclaration conflict.
+    session_enums: HashMap<String, Vec<(String, usize)>>,
     /// Classes declared so far (this file): name -> (parent, fields,
     /// methods) — resolves `self.x` checks through the same-file chain
     /// (26.0.12.6).
     classes: HashMap<String, (Option<String>, Vec<String>, Vec<String>)>,
+    /// Classes declared on earlier REPL lines; fallback for the
+    /// `self.x` field-check parent-chain walk (26.0.12.15).
+    session_classes: HashMap<String, (Option<String>, Vec<String>, Vec<String>)>,
     /// Active while compiling a method of a class that declared fields:
     /// the compile-time `self.x` check (26.0.12.6).
     method_check: Option<Rc<ClassCheck>>,
@@ -551,7 +617,7 @@ impl Compiler {
                     let mut strict = true;
                     let mut pname = parent.clone();
                     while let Some(p) = &pname {
-                        match self.classes.get(p) {
+                        match self.classes.get(p).or_else(|| self.session_classes.get(p)) {
                             Some((pp, pf, pm)) => {
                                 all_fields.extend(pf.iter().cloned());
                                 all_methods.extend(pm.iter().cloned());
@@ -1136,6 +1202,8 @@ impl Compiler {
             &module_dir,
             chain,
             format!("<module {name}>"),
+            HashMap::new(),
+            HashMap::new(),
         )?;
 
         // [Constant proto][Constant path] Import [Constant name] DefineGlobal
@@ -1644,7 +1712,7 @@ fn same_fields(a: &[VariantField], b: &[VariantField]) -> bool {
         }
         if let Some(en) = enum_name {
             if !has_catchall {
-                match self.enums.get(en) {
+                match self.enums.get(en).or_else(|| self.session_enums.get(en)) {
                     None => {
                         return Err(self.err(
                             format!(
@@ -1907,10 +1975,13 @@ fn same_fields(a: &[VariantField], b: &[VariantField]) -> bool {
                 let found = self
                     .enums
                     .get(enum_name)
+                    .or_else(|| self.session_enums.get(enum_name))
                     .and_then(|vs| vs.iter().find(|(n, _)| n == variant).map(|(_, a)| *a));
                 match found {
                     None => {
-                        let msg = if self.enums.contains_key(enum_name) {
+                        let msg = if self.enums.contains_key(enum_name)
+                            || self.session_enums.contains_key(enum_name)
+                        {
                             format!("enum '{enum_name}' has no variant '{variant}'")
                         } else {
                             format!(

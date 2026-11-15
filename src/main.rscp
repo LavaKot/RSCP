@@ -32,7 +32,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "26.0.12.14";
+const VERSION: &str = "26.0.12.15";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -356,6 +356,9 @@ fn update() -> i32 {
 fn repl() -> i32 {
     let mut vm = Vm::new();
     vm.repl = true;
+    // Enums/classes declared on earlier lines stay visible to match
+    // patterns and field checks on later lines (26.0.12.15).
+    let mut decls = crate::compiler::SessionDecls::default();
     println!("rscp {VERSION} — enter statements, Ctrl-D to exit.");
     let stdin = io::stdin();
     let mut buf = String::new();
@@ -406,7 +409,7 @@ fn repl() -> i32 {
         if program.len() == 1 && matches!(program[0].kind, StmtKind::Expr(_)) {
             program = vec![echo_statement(program.pop().unwrap())];
         }
-        match compile(&program, std::path::Path::new("")) {
+        match crate::compiler::compile_session(&program, std::path::Path::new(""), &mut decls) {
             Ok(proto) => {
                 if let Err(e) = vm.run_script(proto) {
                     eprintln!("{}", errors::render(&e, "<repl>", &buf));
@@ -417,6 +420,11 @@ fn repl() -> i32 {
             }
         }
         buf.clear();
+    }
+    if !buf.trim().is_empty() {
+        // Ctrl-D inside an unfinished construct: say so instead of
+        // dropping the buffered lines silently (26.0.12.15).
+        eprintln!("repl: input ended inside an incomplete construct; {} line(s) discarded", buf.lines().count());
     }
     // Leak the REPL VM on purpose (26.0.12.12): session globals may hold
     // deeply nested values; the process is about to exit anyway.
