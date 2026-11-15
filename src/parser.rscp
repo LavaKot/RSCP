@@ -190,6 +190,7 @@ impl Parser {
             For => self.for_statement(),
             Try => self.try_statement(),
             Throw => self.throw_statement(),
+            Import => self.import_statement(),
             Return => self.return_statement(),
             Break => {
                 let t = self.advance();
@@ -471,6 +472,40 @@ impl Parser {
         }
         let handler = Box::new(self.block_statement()?);
         Ok(Stmt::new(StmtKind::Try { body, name, handler }, kw.line, kw.col))
+    }
+
+    /// `import "file.rscp"` — bind the module's exports to the file stem,
+    /// or to the name after `as`.
+    fn import_statement(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // import
+        let path_tok = self.expect(TokenType::Str, "a string path after 'import'")?;
+        let path = match &path_tok.lit {
+            Some(Lit::Str(s)) => s.clone(),
+            _ => unreachable!(),
+        };
+        let name = if self.match_ty(TokenType::As).is_some() {
+            self.expect(TokenType::Ident, "a module name after 'as'")?
+                .lexeme
+                .clone()
+        } else {
+            // Default: the file stem without the extension.
+            let stem = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+            let stem = stem.split('.').next().unwrap_or(stem);
+            if stem.is_empty()
+                || !stem.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                || !stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return Err(self.error_at(
+                    &path_tok,
+                    format!(
+                        "cannot derive a module name from '{path}' (the file stem must look like an identifier); use 'import \"{path}\" as name'"
+                    ),
+                ));
+            }
+            stem.to_string()
+        };
+        self.end_statement("after 'import'")?;
+        Ok(Stmt::new(StmtKind::Import { path, name }, kw.line, kw.col))
     }
 
     fn throw_statement(&mut self) -> PResult<Stmt> {
@@ -899,6 +934,17 @@ impl Parser {
                     let tok = self.advance();
                     let idx = self.expression()?;
                     self.expect(TokenType::RBracket, "']' after index")?;
+                    expr = Expr::new(
+                        ExprKind::Index { obj: Box::new(expr), idx: Box::new(idx) },
+                        tok.line,
+                        tok.col,
+                    );
+                }
+                // `m.key` — sugar for `m["key"]`.
+                TokenType::Dot => {
+                    let tok = self.advance();
+                    let name = self.expect(TokenType::Ident, "a property name after '.'")?;
+                    let idx = Expr::new(ExprKind::Str(name.lexeme.clone()), name.line, name.col);
                     expr = Expr::new(
                         ExprKind::Index { obj: Box::new(expr), idx: Box::new(idx) },
                         tok.line,

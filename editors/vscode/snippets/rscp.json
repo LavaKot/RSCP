@@ -160,5 +160,12 @@
       "}"
     ],
     "description": "try/catch with an error binding"
+  },
+  "import": {
+    "prefix": "import",
+    "body": [
+      "import \"${1:module}.rscp\" as ${1:module}"
+    ],
+    "description": "import a module"
   }
 }

@@ -1,0 +1,2 @@
+import "_mod_b.rscp"
+fn a() -> "a"

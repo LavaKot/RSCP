@@ -36,12 +36,22 @@ pub struct Handler {
     pub stack_len: usize,
 }
 
+/// Bookkeeping for a running module frame: when it returns, its globals
+/// (minus builtins) become the export map, and the importer's globals are
+/// restored.
+struct ModuleCtx {
+    path: String,
+    saved_globals: HashMap<String, GlobalCell>,
+}
+
 struct Frame {
     func: Rc<FunctionVal>,
     /// Resume point (instruction index) saved while a callee runs.
     ip: usize,
     /// Stack index of the callee slot; locals start at `base + 1`.
     base: usize,
+    /// Set while an imported module is running in this frame.
+    module: Option<Box<ModuleCtx>>,
 }
 
 pub struct Vm {
@@ -51,6 +61,9 @@ pub struct Vm {
     open_upvalues: Vec<(usize, Rc<RefCell<Upvalue>>)>,
     /// Active `try` handlers, innermost last.
     pub handlers: Vec<Handler>,
+    /// Imported modules by canonical path: the export map (diamond imports
+    /// run the module once).
+    pub modules: HashMap<String, Value>,
     /// REPL mode: allow redefining and reassigning top-level bindings.
     pub repl: bool,
     /// When true, `print`/`println` produce no output (used by tests).
@@ -77,6 +90,7 @@ impl Vm {
             globals: HashMap::new(),
             open_upvalues: Vec::new(),
             handlers: Vec::new(),
+            modules: HashMap::new(),
             repl: false,
             quiet: false,
             rng: seed,
@@ -128,7 +142,7 @@ impl Vm {
         self.handlers.clear();
         let func = Rc::new(FunctionVal { proto, upvalues: Vec::new() });
         self.stack.push(Value::Func(Rc::clone(&func)));
-        self.frames.push(Frame { func, ip: 0, base: 0 });
+        self.frames.push(Frame { func, ip: 0, base: 0, module: None });
         self.exec()
     }
 
@@ -404,7 +418,7 @@ impl Vm {
                                     ));
                                 }
                                 self.frames.last_mut().unwrap().ip = ip;
-                                self.frames.push(Frame { func: Rc::clone(&f), ip: 0, base: callee_pos });
+                                self.frames.push(Frame { func: Rc::clone(&f), ip: 0, base: callee_pos, module: None });
                                 continue 'outer;
                             }
                             other => rt!(op_ip, format!(
@@ -437,10 +451,10 @@ impl Vm {
                     }
                     Op::Return => {
                         let result = self.stack.pop();
-                        let frame_base = base;
+                        let frame = self.frames.pop().unwrap();
+                        let frame_base = frame.base;
                         self.close_upvalues_ge(frame_base);
                         self.stack.truncate(frame_base);
-                        self.frames.pop();
                         // Handlers registered by the returning frame die with it.
                         while self
                             .handlers
@@ -449,12 +463,27 @@ impl Vm {
                         {
                             self.handlers.pop();
                         }
+                        // A module frame returns its export map and restores
+                        // the importer's globals.
+                        let value = match frame.module {
+                            Some(ctx) => {
+                                let mut map = HashMap::new();
+                                for (k, cell) in std::mem::take(&mut self.globals) {
+                                    if !matches!(cell.value, Value::Native(_)) {
+                                        map.insert(k, cell.value);
+                                    }
+                                }
+                                self.globals = ctx.saved_globals;
+                                let v = Value::Map(Rc::new(RefCell::new(map)));
+                                self.modules.insert(ctx.path, v.clone());
+                                v
+                            }
+                            None => result.unwrap_or(Value::Null),
+                        };
                         if self.frames.is_empty() {
                             return Ok(());
                         }
-                        if let Some(v) = result {
-                            self.stack.push(v);
-                        }
+                        self.stack.push(value);
                         continue 'outer;
                     }
                     Op::Array => {
@@ -590,6 +619,37 @@ impl Vm {
                     Op::Throw => {
                         let v = self.stack.pop().unwrap();
                         rt!(op_ip, v.display_string(0));
+                    }
+                    Op::Import => {
+                        // Stack: [proto, path] -> [export map]. First import
+                        // runs the module in a fresh global scope via a
+                        // module frame; its Return builds the map.
+                        let path = match self.stack.pop().unwrap() {
+                            Value::Str(s) => s.to_string(),
+                            _ => rt_fatal!(op_ip, "internal error: Import path is not a string"),
+                        };
+                        let proto = match self.stack.pop().unwrap() {
+                            Value::Proto(p) => p,
+                            _ => rt_fatal!(op_ip, "internal error: Import constant is not a prototype"),
+                        };
+                        if let Some(m) = self.modules.get(&path) {
+                            self.stack.push(m.clone());
+                        } else {
+                            let saved_globals = std::mem::take(&mut self.globals);
+                            self.globals = HashMap::new();
+                            crate::builtins::install(self);
+                            self.frames.last_mut().unwrap().ip = ip;
+                            let func = Rc::new(FunctionVal { proto, upvalues: Vec::new() });
+                            self.stack.push(Value::Func(Rc::clone(&func)));
+                            let base2 = self.stack.len() - 1;
+                            self.frames.push(Frame {
+                                func,
+                                ip: 0,
+                                base: base2,
+                                module: Some(Box::new(ModuleCtx { path, saved_globals })),
+                            });
+                            continue 'outer;
+                        }
                     }
                     Op::ToString => {
                         let v = self.stack.pop().unwrap();
@@ -945,7 +1005,7 @@ mod tests {
     fn run(src: &str) -> Result<Vm, RscpError> {
         let tokens = Lexer::new(src).tokenize()?;
         let program = Parser::new(tokens).parse()?;
-        let proto = compile(&program)?;
+        let proto = compile(&program, std::path::Path::new(""))?;
         let mut vm = Vm::new();
         vm.quiet = true;
         vm.run_script(proto)?;

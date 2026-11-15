@@ -35,6 +35,9 @@ fn list_rscp_files(dir: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().map_or(false, |x| x == "rscp"))
+        // Files starting with '_' are helpers imported by other cases,
+        // not standalone programs.
+        .filter(|p| p.file_stem().map_or(false, |s| !s.to_string_lossy().starts_with('_')))
         .collect();
     files.sort();
     files

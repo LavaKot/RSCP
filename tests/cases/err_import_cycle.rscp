@@ -1,0 +1,2 @@
+import "_mod_a.rscp"
+println(_mod_a.a())

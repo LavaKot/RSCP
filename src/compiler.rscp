@@ -5,11 +5,14 @@
 //! script's top level become globals. Names that escape a function are
 //! captured as upvalues (see `vm.rscp` for the runtime side).
 
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::ast::*;
 use crate::bytecode::{Chunk, FnProto, Op};
 use crate::errors::RscpError;
+use crate::lexer::Lexer;
+use crate::parser::Parser;
 use crate::value::Value;
 
 /// Max locals per function (slot indices are u8; slot 0 is reserved).
@@ -72,12 +75,25 @@ struct LoopCtx {
     cont_target: Option<usize>,
 }
 
-/// Compile a program into the script prototype.
-pub fn compile(program: &[Stmt]) -> Result<Rc<FnProto>, RscpError> {
+/// Compile a program into the script prototype. `base_dir` is the
+/// directory of the source file; `import` paths resolve against it.
+pub fn compile(program: &[Stmt], base_dir: &Path) -> Result<Rc<FnProto>, RscpError> {
+    compile_in_chain(program, base_dir, Vec::new(), "<script>".to_string())
+}
+
+/// Compile a module (or the script, with an empty chain). The chain holds
+/// the canonical paths of the files currently being compiled, so a cycle
+/// (`a` imports `b` imports `a`) is a compile error instead of a loop.
+fn compile_in_chain(
+    program: &[Stmt],
+    base_dir: &Path,
+    chain: Vec<PathBuf>,
+    proto_name: String,
+) -> Result<Rc<FnProto>, RscpError> {
     let mut c = Compiler {
         fns: vec![FnCtx {
             proto: FnProto {
-                name: "<script>".to_string(),
+                name: proto_name,
                 arity: 0,
                 upvalues: Vec::new(),
                 chunk: Chunk::new(),
@@ -96,6 +112,8 @@ pub fn compile(program: &[Stmt]) -> Result<Rc<FnProto>, RscpError> {
         loops: Vec::new(),
         top_names: Vec::new(),
         temp_n: 0,
+        base_dir: base_dir.to_path_buf(),
+        chain,
     };
     c.stmts(program)?;
     let line = program.last().map_or(1, |s| s.line);
@@ -112,6 +130,10 @@ struct Compiler {
     top_names: Vec<String>,
     /// Counter for hidden `%mN`/`%rN` locals of nested match expressions.
     temp_n: usize,
+    /// Directory of the file being compiled; `import` paths resolve here.
+    base_dir: PathBuf,
+    /// Canonical paths of the files being compiled (cycle detection).
+    chain: Vec<PathBuf>,
 }
 
 impl Compiler {
@@ -636,6 +658,9 @@ impl Compiler {
                 self.emit(Op::Throw, s.line, s.col);
                 self.drop_temps(1);
             }
+            StmtKind::Import { path, name } => {
+                self.compile_import(path, name, s.line, s.col)?;
+            }
             StmtKind::Return(value) => {
                 if self.fns.len() == 1 {
                     return Err(self.err("'return' outside of a function", s.line, s.col));
@@ -721,6 +746,64 @@ impl Compiler {
         self.loops
             .last()
             .map_or(false, |l| l.fn_depth == self.fns.len())
+    }
+
+    /// Compile `import "path" [as name]`: resolve the file relative to the
+    /// current file, reject cycles, recursively compile it, then emit code
+    /// that runs it once (VM-cached by path) and binds its exports.
+    fn compile_import(
+        &mut self,
+        path: &str,
+        name: &str,
+        line: usize,
+        col: usize,
+    ) -> Result<(), RscpError> {
+        let full = self.base_dir.join(path);
+        let canon = full.canonicalize().map_err(|_| {
+            self.err(format!("cannot import '{path}': file not found"), line, col)
+        })?;
+        if self.chain.iter().any(|p| *p == canon) {
+            return Err(self.err(
+                format!("circular import of '{path}' (it is already being compiled)"),
+                line,
+                col,
+            ));
+        }
+        let src = std::fs::read_to_string(&canon).map_err(|e| {
+            self.err(format!("cannot import '{path}': {e}"), line, col)
+        })?;
+        let tokens = Lexer::new(&src).tokenize()?;
+        let program = Parser::new(tokens).parse()?;
+        let mut chain = self.chain.clone();
+        chain.push(canon.clone());
+        let module_dir = canon.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let proto = compile_in_chain(
+            &program,
+            &module_dir,
+            chain,
+            format!("<module {name}>"),
+        )?;
+
+        // [Constant proto][Constant path] Import [Constant name] DefineGlobal
+        let ci = self.constant(Value::Proto(proto), line, col)?;
+        self.emit_u16(Op::Constant, ci, line, col);
+        self.push_temp();
+        let path_str = canon.to_string_lossy().to_string();
+        let pi = self.string_const(&path_str, line, col)?;
+        self.emit_u16(Op::Constant, pi, line, col);
+        self.push_temp();
+        self.emit(Op::Import, line, col);
+        self.drop_temps(2);
+        self.push_temp(); // the module's export map
+        // The map from Import is the value; the name rides in the operand.
+        let ni = self.string_const(name, line, col)?;
+        self.emit_u16(Op::DefineGlobalConst, ni, line, col);
+        self.drop_temps(1);
+        if self.top_names.iter().any(|n| n == name) {
+            return Err(self.err(format!("'{name}' is already defined at the top level"), line, col));
+        }
+        self.top_names.push(name.to_string());
+        Ok(())
     }
 
     fn patch_to(&mut self, site: usize, target: usize) {
@@ -1315,7 +1398,7 @@ mod tests {
     fn compile_src(src: &str) -> Rc<FnProto> {
         let tokens = Lexer::new(src).tokenize().unwrap();
         let program = Parser::new(tokens).parse().unwrap();
-        compile(&program).unwrap()
+        compile(&program, Path::new("")).unwrap()
     }
 
     #[test]
@@ -1386,7 +1469,7 @@ mod tests {
         for src in ["var r = 1..10\n", "var x = 0\nx = 2..=5\n", "println(0..1)\n"] {
             let tokens = Lexer::new(src).tokenize().unwrap();
             let program = Parser::new(tokens).parse().unwrap();
-            assert!(compile(&program).is_err(), "expected error for: {src}");
+            assert!(compile(&program, Path::new("")).is_err(), "expected error for: {src}");
         }
     }
 
@@ -1426,7 +1509,7 @@ while total > 30 {
         for src in cases {
             let tokens = Lexer::new(src).tokenize().unwrap();
             let program = Parser::new(tokens).parse().unwrap();
-            assert!(compile(&program).is_err(), "expected error for: {src}");
+            assert!(compile(&program, Path::new("")).is_err(), "expected error for: {src}");
         }
     }
 }

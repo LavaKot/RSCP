@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.4.0.0 — enter statements, Ctrl-D to exit.
+rscp 2026.5.0.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.4.0.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.5.0.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -324,6 +324,32 @@ unreachable), and if nothing matches at runtime the match raises a
 catchable `match: no arm matched the value` error. `break`/`continue`/`return`
 inside an arm body do what they'd do in the enclosing loop or function.
 
+### Modules: `import` and dot access
+
+`import "file.rscp"` compiles and runs the module once (relative to the
+importing file), then binds its top-level bindings — functions, constants,
+anything — as an immutable map. Access members with dot syntax, which is
+sugar for `["key"]` on any map:
+
+```rust
+import "math.rscp"             // binds the name from the file stem
+println(math.double(21))       // 42
+import "math.rscp" as m        // ...or pick your own name
+println(m.golden)
+
+var cfg = {"host": "localhost", "port": 8080}
+println(cfg.port)              // dot reads...
+cfg.port = 9090                // ...and writes; cfg["port"] still works
+```
+
+Diamond imports run the module body once (a cache keyed by path). Cycles
+are a compile error. Exports are a **snapshot** of the module's top-level
+bindings: pure functions and constants travel freely, and state works
+through closures (shared upvalues) or arrays/maps exported by reference —
+but a module function reaching for a module-level `var` by name after the
+import is done sees the importer's globals, so keep mutable state inside
+closures (`fn make_counter() { … }`) like in `examples/modules.rscp`.
+
 ### Errors: `try` / `catch` / `throw`
 
 Runtime errors are values you can catch: division by zero, out-of-bounds
@@ -500,7 +526,7 @@ runtime without building temporary arrays.
 program        := statement* EOF ;
 
 statement      := letStmt | fnStmt | ifStmt | whileStmt | loopStmt | forStmt
-                | tryStmt | throwStmt | returnStmt | breakStmt | continueStmt
+                | tryStmt | throwStmt | importStmt | returnStmt | breakStmt | continueStmt
                 | block | assignment | incDec | exprStmt | ";" ;
 
 letStmt        := ("let" | "var") IDENT "=" expression [";"] ;
@@ -522,6 +548,7 @@ returnStmt     := "return" [ expression ] [";"] ;
 breakStmt      := "break" [";"] ;
 continueStmt   := "continue" [";"] ;
 tryStmt        := "try" block "catch" [ IDENT ] block ;
+importStmt     := "import" STRING [ "as" IDENT ] ;
 throwStmt      := "throw" expression [";"] ;
 block          := "{" ( statement | ";" )* "}" ;
 
@@ -545,7 +572,7 @@ term           := factor { ( "+" | "-" ) factor } ;
 factor         := unary { ( "*" | "/" | "%" ) unary } ;
 unary          := ( "!" | "-" | "~" ) unary | power ;
 power          := postfix [ "**" unary ] ;   (* right-assoc, tighter than unary *)
-postfix        := primary { "(" [ arguments ] ")" | "[" expression "]" } ;
+postfix        := primary { "(" [ arguments ] ")" | "[" expression "]" | "." IDENT } ;
 arguments      := expression { "," expression } [ "," ] ;
 primary        := INT | FLOAT | STRING | FSTRING | "true" | "false" | "null" | IDENT
                 | "(" expression ")" | arrayLit | mapLit | "fn" funcBody
@@ -669,11 +696,11 @@ cargo test
 * **57 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **89 golden cases** in `tests/cases/`: each program's exact stdout is
+* **92 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
-* **9 showcase examples** are smoke-tested (`examples/`).
+* **10 showcase examples** are smoke-tested (`examples/`).
 * The CLI surface itself is tested (exit codes, subcommands).
 
 ---
@@ -714,13 +741,20 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.4.0` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.4.0.0`), release
+(`2026.5.0` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.5.0.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.5.0.0** — modules and record-style access. `import "file.rscp"`
+  [as name] compiles the file once (path-relative, diamond-cached, cycles
+  rejected) and binds its top-level bindings as an immutable map; `m.key`
+  dot access is sugar for `m["key"]` on any map, for reads and writes
+  (`cfg.port = 9090`). Exports snapshot the module's globals; state works
+  through closures and shared reference types (documented, with examples).
+  58 unit tests, 92 golden cases, new `examples/modules.rscp`.
 * **2026.4.0.0** — error handling: `try` / `catch` / `throw`. Runtime errors
   (division by zero, bad indexes, missing keys, failed asserts, `panic()`)
   are catchable values: `try { risky() } catch e { … }` binds the message,

@@ -30,7 +30,7 @@ fn continues_expression(ty: TokenType) -> bool {
     matches!(
         ty,
         RBrace | RBracket | RParen | Comma | Colon | Semicolon | Question | DotDot | DotDotEq
-            | Arrow | FatArrow | Else | Catch
+            | Dot | Arrow | FatArrow | Else | Catch
     )
 }
 
@@ -547,9 +547,11 @@ impl<'src> Lexer<'src> {
                         DotDot
                     }
                 }
+                // `m.key` — property access (a lone '.' is never valid).
+                Some(c) if c.is_ascii_alphabetic() || c == '_' => Dot,
                 _ => {
                     return Err(RscpError::lex(
-                        "unexpected character '.' (a lone '.' is not valid; use '..' for ranges)",
+                        "unexpected character '.' (a lone '.' is not valid; use '..' for ranges or '.' for map.key access)",
                         line,
                         col,
                     ))

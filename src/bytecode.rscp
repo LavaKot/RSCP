@@ -92,9 +92,12 @@ pub enum Op {
     PopHandler,
     /// raise a runtime error carrying the popped value's text (catchable)
     Throw,
+    /// pop (path, proto); push the module's export map — running the module
+    /// in a fresh global scope on first import (VM caches it by path)
+    Import,
 }
 
-const ALL_OPS: [Op; 52] = [
+const ALL_OPS: [Op; 53] = [
     Op::Constant,
     Op::Null,
     Op::True,
@@ -147,6 +150,7 @@ const ALL_OPS: [Op; 52] = [
     Op::TryCatch,
     Op::PopHandler,
     Op::Throw,
+    Op::Import,
 ];
 
 impl Op {
@@ -208,6 +212,7 @@ impl Op {
             Op::TryCatch => "TryCatch",
             Op::PopHandler => "PopHandler",
             Op::Throw => "Throw",
+            Op::Import => "Import",
         }
     }
 
