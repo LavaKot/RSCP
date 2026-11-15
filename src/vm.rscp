@@ -1000,12 +1000,22 @@ impl Vm {
                             Value::Str(k) => Rc::clone(k),
                             _ => rt_fatal!(op_ip, "internal error: method name must be a string"),
                         };
-                        let (f, bound_self) = match &obj {
+                        // A property holding a class (e.g. a class exported
+                        // by a module) constructs on call, exactly like
+                        // `C()` (26.0.12.13); functions call as before.
+                        enum PropCallee {
+                            Func(Rc<FunctionVal>, Option<Value>),
+                            Class(Rc<RefCell<crate::value::ValueMap>>),
+                        }
+                        let callee = match &obj {
                             Value::Map(m) => {
                                 let mref = m.borrow();
                                 if let Some(v) = mref.get(&*key) {
                                     match v {
-                                        Value::Func(f) => (Rc::clone(f), None),
+                                        Value::Func(f) => PropCallee::Func(Rc::clone(f), None),
+                                        Value::Map(cm) if is_class(v) => {
+                                            PropCallee::Class(Rc::clone(cm))
+                                        }
                                         other => rtc!(op_ip, "TYPE", format!(
                                             "property '{key}' of a {} is not a function",
                                             other.type_name()
@@ -1014,7 +1024,7 @@ impl Vm {
                                 } else if let Some(Value::Map(class)) = mref.get("__class__") {
                                     let class = Value::Map(Rc::clone(class));
                                     match find_method(&class, &key) {
-                                        Some(f) => (f, Some(obj.clone())),
+                                        Some(f) => PropCallee::Func(f, Some(obj.clone())),
                                         None => rtc!(op_ip, "UNKNOWN_METHOD", format!(
                                             "unknown method '{key}' in class '{}'",
                                             class_name(&class)
@@ -1028,6 +1038,28 @@ impl Vm {
                                 "cannot call methods on {}",
                                 other.type_name()
                             )),
+                        };
+                        let (f, bound_self) = match callee {
+                            PropCallee::Class(cm) => {
+                                // Reshape [obj, key, args...] into the plain
+                                // call shape [class, args...] and construct.
+                                self.stack[obj_pos] = Value::Map(Rc::clone(&cm));
+                                self.stack.remove(obj_pos + 1);
+                                match self.call_class(cm, obj_pos, op_ip, ip) {
+                                    CallOutcome::Pushed(v) => {
+                                        self.stack.push(v);
+                                    }
+                                    CallOutcome::Entered => {
+                                        continue 'outer;
+                                    }
+                                    CallOutcome::Handled => {
+                                        break;
+                                    }
+                                    CallOutcome::Fatal(e) => return Err(e),
+                                }
+                                continue;
+                            }
+                            PropCallee::Func(f, bound_self) => (f, bound_self),
                         };
                         let self_extra = if bound_self.is_some() { 1 } else { 0 };
                         if f.proto.arity as usize != argc + self_extra {
