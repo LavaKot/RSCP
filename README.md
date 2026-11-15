@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.8 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.9 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.8.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.9.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,7 +304,7 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So the current release is `26.0.12.3` (`v26.0.12.8`); a hotfix on top of
+So the current release is `26.0.12.3` (`v26.0.12.9`); a hotfix on top of
 it would be `26.0.12.4`, and the next feature release `26.0.13.0`. While
 the second number is `0`, GitHub releases are titled **"Beta …"** (e.g.
 "Beta 26.0.12.3"); from the first stable release the prefix disappears.
@@ -318,6 +318,11 @@ README.
 
 ## Changelog
 
+* **26.0.12.9** — a leading UTF-8 BOM is stripped before tokenizing.
+  Windows editors (Notepad, some PowerShell redirections) prepend
+  `EF BB BF` to saved scripts; until now that was a lexical error on
+  line 1 ("unexpected character"). `rscp`, `rscp run` and `rscp fmt` all
+  accept BOM-prefixed files now. Found by `scripts/holes.py` (group T).
 * **26.0.12.8** — a `match` that can miss is a compile error. Literal and
   range matches without a catch-all (`else` or a binding) used to run and
   raise `NO_ARM` at runtime when an uncovered value arrived; now they do

@@ -59,6 +59,9 @@ pub struct Lexer<'src> {
 
 impl<'src> Lexer<'src> {
     pub fn new(src: &'src str) -> Self {
+        // Strip a leading UTF-8 BOM (EF BB BF, 26.0.12.9): Windows editors
+        // prepend it and it used to be a lexical error on line 1.
+        let src = src.strip_prefix('\u{feff}').unwrap_or(src);
         Lexer { src, pos: 0, line: 1, col: 1 }
     }
 
