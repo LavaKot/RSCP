@@ -91,7 +91,9 @@ e.g. `26.0.7.0`):
 
 ### Windows
 
-Run the installer and check a **new** terminal window:
+Run the installer — `rscp` is available **immediately**, even in terminal
+windows that were already open (the installer drops an instant alias into
+`WindowsApps`, the same mechanism that makes `python` work right away):
 
 ```
 rscp version
@@ -99,8 +101,9 @@ rscp examples\fizzbuzz.rscp
 ```
 
 Prefer the archive? Unzip `rscp-<version>-windows-x64.zip` to a permanent
-place (e.g. `C:\rscp`), follow `INSTALL.txt` inside, and the editor plugin
-is `rscp-<version>.vsix`.
+place (e.g. `C:\rscp`) and double-click `add-to-path.cmd` — it sets up the
+PATH and the instant alias the same way. `remove-from-path.cmd` undoes it.
+The editor plugin is `rscp-<version>.vsix`.
 
 Staying up to date is one command (the repository is public — no token
 needed):
@@ -145,7 +148,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.7.0 — enter statements, Ctrl-D to exit.
+rscp 26.0.8.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -161,7 +164,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.7.0.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.8.0.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -252,19 +255,30 @@ counter carries over; this is feature release #7).
 | 3rd | feature releases — one number per shipped feature set | `7` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So this release is `26.0.7.0` (`v26.0.7.0`); a hotfix on top of it would be
+So this release is `26.0.7.0` (`v26.0.8.0`); a hotfix on top of it would be
 `26.0.7.1`, and the next feature release `26.0.8.0`. While the second
 number is `0`, GitHub releases are titled **"Beta …"** (e.g. "Beta
 26.0.7.0"); from the first stable release the prefix disappears.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`26.0.7` in this release). The full four-number version lives in
+(`26.0.8` in this release). The full four-number version lives in
 `rscp version`, the REPL banner, release tags, release file names and this
 README.
 
 ## Changelog
 
+* **26.0.8.0** — `rscp` works right after install, like `python`. The
+  Windows installer (and the new `add-to-path.cmd` in the zip) now puts an
+  instant alias — a copy of `rscp.exe` — into
+  `%LOCALAPPDATA%\Microsoft\WindowsApps`, a folder that sits on the user
+  PATH of every process, so the `rscp` command works even in terminals
+  opened *before* the install. The PATH write itself became safer: entries
+  like `%USERPROFILE%\bin` and the `REG_EXPAND_SZ` registry type are
+  preserved, `WM_SETTINGCHANGE` is broadcast so new terminals pick the PATH
+  up without a logoff, and a direct registry write replaces PowerShell when
+  it is unavailable. `rscp update` now updates the alias too (and resolves
+  the real install directory when launched through it).
 * **26.0.7.0** — new home, new numbering, new license. The repository is
   public and renamed **rscp → RSCP** (old `LavaKot/rscp` links redirect
   automatically), which also makes `rscp update` work **without a GitHub

@@ -1,4 +1,4 @@
-" Vim syntax file for RSCP 26.0.7.0
+" Vim syntax file for RSCP 26.0.8.0
 " Place in ~/.vim/syntax/rscp.vim (or ~/.config/nvim/syntax/rscp.vim),
 " together with the ftdetect rule from editors/vim/ftdetect/rscp.vim.
 

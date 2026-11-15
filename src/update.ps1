@@ -58,7 +58,21 @@ if (-not $asset) { Fail "в релизе $latest нет файла *-windows-x64
 # ---- where is rscp installed? ----------------------------------------------
 if (-not $ExePath -or -not (Test-Path $ExePath)) { Fail "не удалось определить, где лежит rscp.exe" }
 $dir = Split-Path -Parent $ExePath
+
+# When launched through the "instant alias" (a copy of rscp.exe in
+# %LOCALAPPDATA%\Microsoft\WindowsApps, installed for PATH-free startup),
+# update the REAL install directory instead - its location is remembered in
+# HKCU\Software\RSCP\InstallDir by the installer / add-to-path.cmd.
+if ($dir -like '*\Microsoft\WindowsApps') {
+    $reg = Get-ItemProperty -Path 'HKCU:\Software\RSCP' -ErrorAction SilentlyContinue
+    $real = if ($reg) { $reg.InstallDir } else { $null }
+    if (-not $real -or -not (Test-Path (Join-Path $real 'rscp.exe'))) {
+        Fail "rscp запущен через алиас в WindowsApps, а папка установки не найдена. Запустите rscp.exe из папки установки (обычно C:\rscp)."
+    }
+    $dir = $real
+}
 Write-Host "Папка установки: $dir"
+$ExePath = Join-Path $dir 'rscp.exe'
 
 # leftovers of a previous update + versioned files replaced by newer names
 Remove-Item (Join-Path $dir 'rscp.old.exe') -Force -ErrorAction SilentlyContinue
@@ -98,6 +112,21 @@ try {
 }
 Remove-Item -LiteralPath (Join-Path $dir 'rscp.old.exe') -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+
+# ---- keep the WindowsApps instant alias in sync -----------------------------
+$aliasDir = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+$alias = Join-Path $aliasDir 'rscp.exe'
+if (Test-Path $alias) {
+    try {
+        Copy-Item (Join-Path $dir 'rscp.exe') $alias -Force
+        Write-Host "Алиас в WindowsApps обновлён."
+    } catch {
+        # copying over a running exe can fail; rename it away first
+        Move-Item $alias (Join-Path $aliasDir 'rscp.old.exe') -Force -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $dir 'rscp.exe') $alias -Force -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $aliasDir 'rscp.old.exe') -Force -ErrorAction SilentlyContinue
+    }
+}
 
 # ---- refresh the VS Code extension if an editor CLI is present --------------
 $vsix = Get-ChildItem -LiteralPath $dir -Filter 'rscp-*.vsix' | Select-Object -First 1
