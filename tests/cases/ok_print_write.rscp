@@ -1,0 +1,6 @@
+# print ends the line (Python style); write does not
+print("line one")
+println("line two via println")
+write("no")
+write("newline")
+print()

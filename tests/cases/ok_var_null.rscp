@@ -1,0 +1,8 @@
+# var without an initializer is null; nil/none/null are synonyms (2026.5.5)
+var x
+println(x, type(x))
+x = 5
+println(x)
+println(null == nil, nil == none, none == null)
+let m = {"a": 1}
+println(m["a"], m.a)

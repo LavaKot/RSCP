@@ -19,5 +19,5 @@ let xs = [1, 2, 3, 4, 5, 6];
 println(filter(xs, fn(x) { return x % 2 == 0; }));
 println(map(xs, fn(x) { return x * x; }));
 println(reduce(xs, 0, fn(a, b) { return a + b; }));
-each(["a", "b"], fn(s) { print(s); print("-"); });
+each(["a", "b"], fn(s) { write(s); write("-"); });
 println();

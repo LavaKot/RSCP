@@ -30,7 +30,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "2026.5.4.0";
+const VERSION: &str = "2026.5.5.0";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -70,8 +70,8 @@ LANGUAGE (light syntax):
     println(cfg.host)                  # dot access = cfg[\"host\"]
 
 BUILT-INS:
-    print println len str int float type abs min max sqrt pow rand clock
-    push pop keys has assert panic
+    print println write len str int float type abs min max sqrt pow rand
+    clock push pop keys has assert panic
     upper lower trim split join replace contains starts_with ends_with
     slice find repeat ord chr
 

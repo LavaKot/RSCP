@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.5.4.0 — enter statements, Ctrl-D to exit.
+rscp 2026.5.5.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.5.4.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.5.5.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -215,12 +215,14 @@ for i in 0..10 { ... }                 # the 2026.2.0.0 way
 
 ### Variables: `let` vs `var`
 
-`let` binds immutably (like Rust `let` / C++ `const`), `var` mutably. Every
-variable must be initialized — there are no uninitialized reads in RSCP.
+`let` binds immutably (like Rust `let` / C++ `const`), `var` mutably. A
+`let` always needs an initializer; `var x` alone is fine and declares `x`
+as `null` (since 2026.5.5) — assign to it later.
 
 ```rust
 let answer = 42                # cannot be reassigned
 var count = 0                  # can
+var later                      # null for now, assign later (2026.5.5)
 count += 1                     # += -= *= /= %=
 count++                        # ++ -- (statement forms)
 ```
@@ -261,7 +263,8 @@ RSCP is dynamically typed with seven user-visible types:
 | `map`     | `{"a": 1, "b": [2]}`        | string keys, reference type             |
 | `function`| `fn(x) { return x; }`, `\|x\| x` | closures; see below               |
 
-`null` is the absence of a value. `type(v)` returns a value's type name.
+`null` is the absence of a value; `nil` and `none` are synonyms
+(since 2026.5.5). `type(v)` returns a value's type name.
 Ints and floats mix freely in arithmetic (`1 + 0.5` is `1.5`); `int / int`
 is integer division, C style (`7 / 2` is `3`, `-7 / 2` is `-3`).
 
@@ -464,7 +467,8 @@ by zero are runtime errors, not UB.
 
 | Function | Behavior |
 |----------|----------|
-| `print(a, …)` / `println(a, …)` | print values space-separated (println adds `\n`) |
+| `print(a, …)` / `println(a, …)` | print values space-separated, end the line (aliases since 2026.5.5) |
+| `write(a, …)` | the same, without the newline |
 | `len(v)` | string length (chars), array or map size |
 | `str(v)` | value → string (`1.0` stays visibly `1.0`) |
 | `int(v)` | float truncates toward zero; string parses (`int("42")`) |
@@ -739,7 +743,7 @@ cargo test
 * **57 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **102 golden cases** in `tests/cases/`: each program's exact stdout is
+* **104 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
@@ -785,13 +789,18 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.5.4` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.5.4.0`), release
+(`2026.5.5` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.5.5.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.5.5.0** — `print` and friends. `print(...)` is now the Python-style
+  primary: it ends the line (`println` stays as an alias, and the no-newline
+  form is the new `write`). `nil` and `none` are synonyms of `null`.
+  `var x` without an initializer declares `x` as `null`; `let` still
+  requires one. 61 unit tests, 104 golden cases.
 * **2026.5.4.0** — slices and negative indexes, Python style.
   `a[start:end:step]` right in the index brackets (any part optional,
   negative bounds count from the end, a negative step walks backwards —

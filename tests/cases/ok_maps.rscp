@@ -5,7 +5,7 @@ m["three"] = 3;
 println(m, len(m));
 println(has(m, "two"), has(m, "four"));
 println(keys(m));
-for (let k in keys(m)) { print(k); print(" "); }
+for (let k in keys(m)) { write(k); write(" "); }
 println();
 m["one"] += 10;
 println(m["one"]);

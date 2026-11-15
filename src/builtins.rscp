@@ -13,8 +13,9 @@ use crate::value::Value;
 use crate::vm::Vm;
 
 pub fn install(vm: &mut Vm) {
-    vm.define_native("print", n_print);
-    vm.define_native("println", n_println);
+    vm.define_native("print", n_println); // print ends the line (Python style)
+    vm.define_native("println", n_println); // an alias of print
+    vm.define_native("write", n_write); // the no-newline form
     vm.define_native("len", n_len);
     vm.define_native("str", n_str);
     vm.define_native("int", n_int);
@@ -56,13 +57,16 @@ fn join_display(args: &[Value]) -> String {
         .join(" ")
 }
 
-fn n_print(vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+/// `write(a, ...)` — print without a trailing newline.
+fn n_write(vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     if !vm.quiet {
         print!("{}", join_display(&args));
     }
     Ok(Value::Null)
 }
 
+/// `print(a, ...)` / `println(a, ...)` — print and end the line.
+/// Since 2026.5.5 `print` is the Python-style primary name.
 fn n_println(vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     if !vm.quiet {
         println!("{}", join_display(&args));

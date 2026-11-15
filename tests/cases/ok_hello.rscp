@@ -1,3 +1,2 @@
 println("Hello, RSCP!");
 print("a", "b", 1, 2.5, true, null);
-println();

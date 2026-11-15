@@ -493,13 +493,27 @@ impl Parser {
     }
 
     /// `let`/`var` declaration when the keyword was already consumed.
+    /// Since 2026.5.5 `var x` (no initializer) declares x as `null`.
     fn declaration_after(&mut self, kw: Token) -> PResult<Stmt> {
         let mutable = kw.ty == TokenType::Var;
         let name = self.expect(TokenType::Ident, "a variable name after 'let'/'var'")?;
-        self.expect(
-            TokenType::Assign,
-            "'=' and an initializer (RSCP variables are always initialized)",
-        )?;
+        if self.match_ty(TokenType::Assign).is_none() {
+            if mutable {
+                return Ok(Stmt::new(
+                    StmtKind::Let {
+                        name: name.lexeme.clone(),
+                        mutable,
+                        init: Expr::new(ExprKind::Null, kw.line, kw.col),
+                    },
+                    kw.line,
+                    kw.col,
+                ));
+            }
+            return Err(self.error_at(
+                &name,
+                "an immutable 'let' always needs an initializer — write 'var x' for a null placeholder (since 2026.5.5)",
+            ));
+        }
         let init = self.expression()?;
         Ok(Stmt::new(
             StmtKind::Let {
@@ -1763,6 +1777,16 @@ fn f(
         let stmts = parse("if not done { break }");
         assert!(matches!(&stmts[0].kind, StmtKind::If { cond, .. }
             if matches!(cond.kind, ExprKind::Unary { op: UnaryOp::Not, .. })));
+    }
+
+    #[test]
+    fn var_without_initializer() {
+        // `var x` declares null (2026.5.5); `let x` still needs a value.
+        let stmts = parse("var x\nx = 1");
+        assert!(matches!(&stmts[0].kind, StmtKind::Let { mutable: true, init, .. }
+            if matches!(init.kind, ExprKind::Null)));
+        assert!(matches!(&stmts[1].kind, StmtKind::Assign { .. }));
+        assert!(matches!(parse_err("let x"), RscpError::Parse { .. }));
     }
 
     #[test]

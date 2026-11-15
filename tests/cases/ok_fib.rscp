@@ -12,7 +12,7 @@ fn fibIter(n) {
     }
     return a;
 }
-for (var i = 0; i < 10; i++) { print(fib(i)); print(" "); }
+for (var i = 0; i < 10; i++) { write(fib(i)); write(" "); }
 println();
 println(fib(20));
 println(fibIter(50));

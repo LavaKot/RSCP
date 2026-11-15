@@ -230,6 +230,8 @@ pub fn keyword(ident: &str) -> Option<TokenType> {
         "true" => True,
         "false" => False,
         "null" => Null,
+        "nil" => Null, // synonyms since 2026.5.5
+        "none" => Null,
         "if" => If,
         "else" => Else,
         "while" => While,

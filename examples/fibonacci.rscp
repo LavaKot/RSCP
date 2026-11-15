@@ -12,7 +12,7 @@ fn fibIter(n) {
     return a
 }
 
-for i in 0..12 { print(fib(i), " ") }
+for i in 0..12 { write(fib(i), " ") }
 println()
 println("fib(28)     =", fib(28))
 println("fibIter(90) =", fibIter(90))

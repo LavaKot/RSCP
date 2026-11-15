@@ -793,6 +793,9 @@ mod tests {
         // Word forms of the logical operators (2026.5.2).
         let ts = types("and or not");
         assert_eq!(ts, vec![And, Or, NotWord, Eof]);
+        // null / nil / none are synonyms (2026.5.5).
+        let ts = types("null nil none");
+        assert_eq!(ts, vec![Null, Null, Null, Eof]);
         let ts = types("letx for_ _if fn2 loopx matchy notx andy orz");
         assert_eq!(
             ts,
