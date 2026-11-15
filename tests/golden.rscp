@@ -140,10 +140,12 @@ fn examples_run_cleanly() {
 #[test]
 fn cli_surface() {
     // version — the exact number changes every release, so check the shape:
-    // "rscp YEAR.MAJOR.MINOR.PATCH (bytecode compiler + stack VM, ...)"
+    // "rscp YY.0.MINOR.PATCH (bytecode compiler + stack VM, ...)" and it must
+    // agree with the crate version (26.0.7 -> "rscp 26.0.7.0").
     let out = Command::new(bin()).arg("version").output().unwrap();
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("rscp 20"));
+    let expect = format!("rscp {}.", env!("CARGO_PKG_VERSION"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&expect));
     assert!(String::from_utf8_lossy(&out.stdout).contains("bytecode compiler"));
 
     // help

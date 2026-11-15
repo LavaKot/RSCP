@@ -1,5 +1,5 @@
-# RSCP self-update: download the latest Windows build from the (private)
-# GitHub repository LavaKot/rscp and swap it in place. Launched by `rscp update`;
+# RSCP self-update: download the latest Windows build from the public
+# GitHub repository LavaKot/RSCP and swap it in place. Launched by `rscp update`;
 # the exe path and the running version are passed as parameters.
 param(
     [string]$ExePath = "",
@@ -10,42 +10,37 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # ~10x faster Invoke-WebRequest on PS 5.1
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$repo = 'LavaKot/rscp'
+$repo = 'LavaKot/RSCP'
 
 function Fail([string]$msg) {
     Write-Host "ОШИБКА: $msg" -ForegroundColor Red
     exit 1
 }
 
-# ---- token: the repository is private, downloads need a GitHub PAT --------
+# ---- token: OPTIONAL since the repository is public. A token
+# (RSCP_GITHUB_TOKEN or %USERPROFILE%\.rscp\token) is only useful for
+# private forks or to lift the anonymous API rate limit.
 $token = $env:RSCP_GITHUB_TOKEN
 if (-not $token) {
     $tokenFile = Join-Path $env:USERPROFILE '.rscp\token'
     if (Test-Path $tokenFile) { $token = (Get-Content $tokenFile -Raw).Trim() }
 }
-if (-not $token) {
-    Write-Host "Репозиторий RSCP закрытый, поэтому для скачивания обновлений"
-    Write-Host "нужен персональный токен GitHub (Classic, право repo)."
-    Write-Host "Сохраните его ОДИН раз - и 'rscp update' будет работать всегда:"
-    Write-Host ""
-    Write-Host '    New-Item -ItemType Directory -Force "$env:USERPROFILE\.rscp" | Out-Null'
-    Write-Host '    "ghp_ВАШ_ТОКЕН" | Set-Content "$env:USERPROFILE\.rscp\token"'
-    Write-Host ""
-    Write-Host "Вместо файла можно задать переменную окружения RSCP_GITHUB_TOKEN."
-    exit 1
-}
 
 $headers = @{
-    Authorization          = "Bearer $token"
     'X-GitHub-Api-Version' = '2022-11-28'
     'User-Agent'           = 'rscp-update'
+}
+$dlHeaders = @{ Accept = 'application/octet-stream'; 'User-Agent' = 'rscp-update' }
+if ($token) {
+    $headers['Authorization']   = "Bearer $token"
+    $dlHeaders['Authorization'] = "Bearer $token"
 }
 
 # ---- what is the latest release? -------------------------------------------
 try {
     $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $headers
 } catch {
-    Fail "не удалось узнать последний релиз (проверьте интернет и токен): $($_.Exception.Message)"
+    Fail "не удалось узнать последний релиз (проверьте интернет): $($_.Exception.Message)"
 }
 
 $latest = ($rel.tag_name -replace '^v', '').Trim()
@@ -76,7 +71,7 @@ $zip = Join-Path $tmp $asset.name
 try {
     Invoke-WebRequest -UseBasicParsing `
         -Uri $asset.url `
-        -Headers @{ Authorization = "Bearer $token"; Accept = 'application/octet-stream' } `
+        -Headers $dlHeaders `
         -OutFile $zip
 } catch {
     Fail "не удалось скачать $($asset.name): $($_.Exception.Message)"

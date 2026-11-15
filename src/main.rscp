@@ -31,7 +31,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "2026.6.0.0";
+const VERSION: &str = "26.0.7.0";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -262,8 +262,8 @@ fn report_error(e: RscpError, path: &str, source: &str) -> i32 {
 /// `rscp update`: download the latest Windows build from GitHub and swap the
 /// files in place. The work happens in update.ps1 — PowerShell is preinstalled
 /// on Windows and gives us HTTPS + zip handling without adding any crate
-/// dependencies (the repo itself is private, so the script also reads the
-/// user's GitHub token from %USERPROFILE%\.rscp\token).
+/// dependencies (the repository is public, so no token is needed; one is only
+/// used for private forks, from RSCP_GITHUB_TOKEN or %USERPROFILE%\.rscp\token).
 fn update() -> i32 {
     // Windows-only by design: the updater drives PowerShell and replaces the
     // installed rscp.exe. Everywhere else the update path is a rebuild from

@@ -2,9 +2,13 @@
   "name": "rscp",
   "displayName": "RSCP",
   "description": "RSCP language support: syntax highlighting, snippets and bracket support for .rscp files (light like Python, shaped like Rust)",
-  "version": "2026.6.0",
+  "version": "26.0.7",
   "publisher": "rscp-lang",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LavaKot/RSCP.git"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
