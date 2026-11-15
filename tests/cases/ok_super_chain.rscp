@@ -1,0 +1,18 @@
+# super resolves from the class that DEFINES the running method,
+# not from the instance class (26.0.12.7): 3-level chains used to
+# recurse into themselves and hit the call-depth guard.
+
+class A { fn init() { self.x = 1 } }
+class B(A) { fn init() { super.init() ; self.y = 2 } }
+class C(B) { fn init() { super.init() ; self.z = 3 } }
+var c = C()
+println(c.x, c.y, c.z)
+
+class P { fn hi() -> "p" }
+class M(P) { fn hi() -> super.hi() + "m" }
+class G(M) { fn hi() -> super.hi() + "g" }
+println(G().hi())
+println(M().hi())
+
+# the chain skips to the defining class parent even when the instance
+# is deeper: G().hi() -> M.hi -> P.hi, never G.hi again.

@@ -1070,12 +1070,19 @@ impl Vm {
                     Op::SuperMethod => {
                         // Push the parent class's method for super.name(...);
                         // self is local slot 0 of the enclosing method frame.
+                        // The parent is resolved from the class that DEFINES
+                        // the running method (closure identity in the
+                        // instance's chain), not from the instance's own
+                        // class: with self.__class__ a 3-level chain called
+                        // the middle init forever (26.0.12.7).
                         let ni = read_u16(chunk, &mut ip);
                         let name = match &chunk.consts[ni as usize] {
                             Value::Str(s) => s.to_string(),
                             _ => rt_fatal!(op_ip, "internal error: SuperMethod name"),
                         };
-                        let base = self.frames.last().unwrap().base;
+                        let frame = self.frames.last().unwrap();
+                        let base = frame.base;
+                        let running = Rc::clone(&frame.func);
                         let this = self.stack[base + 1].clone();
                         let parent = match &this {
                             Value::Map(m) => {
@@ -1085,11 +1092,47 @@ impl Vm {
                                 });
                                 match class {
                                     Some(cm) => {
-                                        let parent = cm.borrow().get("__parent__").cloned();
-                                        match parent {
-                                            Some(p @ Value::Map(_)) => p,
-                                            _ => rtc!(op_ip, "UNKNOWN_METHOD", format!(
-                                                "super: class '{}' has no parent",
+                                        // Walk the chain: the first class
+                                        // whose `name` entry IS the running
+                                        // closure is the defining class.
+                                        let mut defining: Option<Rc<RefCell<crate::value::ValueMap>>> = None;
+                                        let mut cur = Some(Rc::clone(&cm));
+                                        for _ in 0..256 {
+                                            let c = match cur {
+                                                Some(c) => c,
+                                                None => break,
+                                            };
+                                            let (hit, next) = {
+                                                let mref = c.borrow();
+                                                let hit = matches!(
+                                                    mref.get(name.as_str()),
+                                                    Some(Value::Func(f)) if Rc::ptr_eq(f, &running)
+                                                );
+                                                let next = match mref.get("__parent__") {
+                                                    Some(Value::Map(pm)) => Some(Rc::clone(pm)),
+                                                    _ => None,
+                                                };
+                                                (hit, next)
+                                            };
+                                            if hit {
+                                                defining = Some(c);
+                                                break;
+                                            }
+                                            cur = next;
+                                        }
+                                        match defining {
+                                            Some(def) => {
+                                                let parent = def.borrow().get("__parent__").cloned();
+                                                match parent {
+                                                    Some(p @ Value::Map(_)) => p,
+                                                    _ => rtc!(op_ip, "UNKNOWN_METHOD", format!(
+                                                        "super: class '{}' has no parent",
+                                                        class_name(&Value::Map(def))
+                                                    )),
+                                                }
+                                            }
+                                            None => rtc!(op_ip, "UNKNOWN_METHOD", format!(
+                                                "super: method '{name}' is not defined in the class chain of '{}'",
                                                 class_name(&Value::Map(cm))
                                             )),
                                         }
