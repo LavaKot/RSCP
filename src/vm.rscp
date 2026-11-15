@@ -8,11 +8,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::{BufWriter, Stdout, Write};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bytecode::{Chunk, FnProto, Op};
 use crate::errors::{RscpError, TraceFrame};
+use crate::fxhash::FxBuild;
 use crate::value::{FunctionVal, Upvalue, Value};
 
 /// Maximum call depth before a "stack overflow" runtime error.
@@ -22,6 +24,76 @@ const MAX_FRAMES: usize = 1024;
 pub struct GlobalCell {
     pub value: Value,
     pub mutable: bool,
+}
+
+/// Globals table: `Rc<str>` keys so a `GetGlobal` never allocates a lookup
+/// `String` (the name constant is already an `Rc<str>` we can clone cheaply),
+/// FxHash for fast lookups.
+pub type GlobalMap = HashMap<Rc<str>, GlobalCell, FxBuild>;
+
+/// Program output. Interactive terminals keep the line-buffered stdout; when
+/// stdout is not a terminal (a pipe or a file), `run` switches to a block
+/// buffer so print-heavy scripts stop paying a flush per line.
+pub enum Out {
+    Line,
+    Full(BufWriter<Stdout>),
+}
+
+impl Out {
+    /// Std's `println!` panics with this message when stdout fails; the
+    /// panic hook in main turns a broken pipe into a quiet exit(141).
+    fn fail(e: std::io::Error) -> ! {
+        panic!("failed printing to stdout: {e}")
+    }
+
+    pub fn write_str(&mut self, s: &str) {
+        match self {
+            Out::Line => {
+                let mut out = std::io::stdout();
+                if let Err(e) = out.write_all(s.as_bytes()) {
+                    Out::fail(e);
+                }
+            }
+            Out::Full(w) => {
+                if let Err(e) = w.write_all(s.as_bytes()) {
+                    Out::fail(e);
+                }
+            }
+        }
+    }
+
+    pub fn write_line(&mut self, s: &str) {
+        match self {
+            Out::Line => {
+                let mut out = std::io::stdout();
+                if let Err(e) = out.write_all(s.as_bytes()) {
+                    Out::fail(e);
+                }
+                if let Err(e) = out.write_all(b"\n") {
+                    Out::fail(e);
+                }
+            }
+            Out::Full(w) => {
+                if let Err(e) = w.write_all(s.as_bytes()) {
+                    Out::fail(e);
+                }
+                if let Err(e) = w.write_all(b"\n") {
+                    Out::fail(e);
+                }
+            }
+        }
+    }
+
+    pub fn flush(&mut self) {
+        match self {
+            Out::Line => {
+                let _ = std::io::stdout().flush();
+            }
+            Out::Full(w) => {
+                let _ = w.flush();
+            }
+        }
+    }
 }
 
 /// An active `try` handler: unwinding restores the frame count and stack
@@ -41,7 +113,7 @@ pub struct Handler {
 /// restored.
 struct ModuleCtx {
     path: String,
-    saved_globals: HashMap<String, GlobalCell>,
+    saved_globals: GlobalMap,
 }
 
 struct Frame {
@@ -61,7 +133,9 @@ struct Frame {
 pub struct Vm {
     pub stack: Vec<Value>,
     frames: Vec<Frame>,
-    pub globals: HashMap<String, GlobalCell>,
+    pub globals: GlobalMap,
+    /// Reusable argument buffer for native calls (no per-call allocation).
+    native_args: Vec<Value>,
     open_upvalues: Vec<(usize, Rc<RefCell<Upvalue>>)>,
     /// Active `try` handlers, innermost last.
     pub handlers: Vec<Handler>,
@@ -72,6 +146,9 @@ pub struct Vm {
     pub repl: bool,
     /// When true, `print`/`println` produce no output (used by tests).
     pub quiet: bool,
+    /// Program output (line-buffered terminal stdout, or a block buffer
+    /// when stdout is a pipe/file).
+    pub out: Out,
     rng: u64,
 }
 
@@ -91,12 +168,14 @@ impl Vm {
         let mut vm = Vm {
             stack: Vec::with_capacity(256),
             frames: Vec::with_capacity(64),
-            globals: HashMap::new(),
+            globals: HashMap::default(),
+            native_args: Vec::new(),
             open_upvalues: Vec::new(),
             handlers: Vec::new(),
             modules: HashMap::new(),
             repl: false,
             quiet: false,
+            out: Out::Line,
             rng: seed,
         };
         crate::builtins::install(&mut vm);
@@ -105,7 +184,7 @@ impl Vm {
 
     pub fn define_native(&mut self, name: &'static str, func: crate::value::NativeFn) {
         self.globals.insert(
-            name.to_string(),
+            Rc::from(name),
             GlobalCell {
                 value: Value::Native(Rc::new(crate::value::NativeVal { name, func })),
                 mutable: false,
@@ -253,8 +332,8 @@ impl Vm {
                     Op::DefineGlobal | Op::DefineGlobalConst => {
                         let ci = read_u16(chunk, &mut ip);
                         let v = self.stack.pop().unwrap();
-                        let name = match &chunk.consts[ci as usize] {
-                            Value::Str(s) => s.to_string(),
+                        let name: Rc<str> = match &chunk.consts[ci as usize] {
+                            Value::Str(s) => Rc::clone(s),
                             _ => rt_fatal!(op_ip, "internal error: global name constant is not a string"),
                         };
                         self.globals.insert(
@@ -264,26 +343,32 @@ impl Vm {
                     }
                     Op::GetGlobal => {
                         let ci = read_u16(chunk, &mut ip);
-                        let name = match &chunk.consts[ci as usize] {
-                            Value::Str(s) => s.to_string(),
+                        // Borrowed lookup: no String allocation, no copy of
+                        // the name (26.0.9.0 — this used to to_string() the
+                        // name on every global read).
+                        let v = match &chunk.consts[ci as usize] {
+                            Value::Str(s) => self.globals.get(&**s).map(|c| c.value.clone()),
                             _ => rt_fatal!(op_ip, "internal error: global name constant is not a string"),
                         };
-                        match self.globals.get(&name) {
-                            Some(cell) => {
-                                let v = cell.value.clone();
-                                self.stack.push(v);
+                        match v {
+                            Some(v) => self.stack.push(v),
+                            None => {
+                                let name = match &chunk.consts[ci as usize] {
+                                    Value::Str(s) => s.to_string(),
+                                    _ => String::new(),
+                                };
+                                rt!(op_ip, format!("undefined variable '{name}'"))
                             }
-                            None => rt!(op_ip, format!("undefined variable '{name}'")),
                         }
                     }
                     Op::SetGlobal => {
                         let ci = read_u16(chunk, &mut ip);
                         let v = self.stack.pop().unwrap();
-                        let name = match &chunk.consts[ci as usize] {
-                            Value::Str(s) => s.to_string(),
+                        let name: Rc<str> = match &chunk.consts[ci as usize] {
+                            Value::Str(s) => Rc::clone(s),
                             _ => rt_fatal!(op_ip, "internal error: global name constant is not a string"),
                         };
-                        match self.globals.get_mut(&name) {
+                        match self.globals.get_mut(&*name) {
                             None => rt!(op_ip, format!("undefined variable '{name}'")),
                             Some(cell) => {
                                 if !cell.mutable && !self.repl {
@@ -297,17 +382,18 @@ impl Vm {
                     }
                     Op::Equal => {
                         let rhs = self.stack.pop().unwrap();
-                        let lhs = self.stack.pop().unwrap();
-                        self.stack.push(Value::Bool(lhs.equals(&rhs)));
+                        let li = self.stack.len() - 1;
+                        let b = self.stack[li].equals(&rhs);
+                        self.stack[li] = Value::Bool(b);
                     }
                     Op::Greater | Op::Less | Op::Le | Op::Ge => {
                         let rhs = self.stack.pop().unwrap();
-                        let lhs = self.stack.pop().unwrap();
-                        let ord = match Value::num_cmp(&lhs, &rhs) {
+                        let li = self.stack.len() - 1;
+                        let ord = match Value::num_cmp(&self.stack[li], &rhs) {
                             Some(ord) => ord,
                             None => rt!(op_ip, format!(
                                 "cannot compare {} and {} with '{}'",
-                                lhs.type_name(),
+                                self.stack[li].type_name(),
                                 rhs.type_name(),
                                 match op {
                                     Op::Greater => ">",
@@ -324,7 +410,7 @@ impl Vm {
                             Op::Le => ord != Greater,
                             _ => ord != Less,
                         };
-                        self.stack.push(Value::Bool(b));
+                        self.stack[li] = Value::Bool(b);
                     }
                     Op::Not => {
                         let v = self.stack.pop().unwrap();
@@ -352,9 +438,18 @@ impl Vm {
                     }
                     Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
                         let rhs = self.stack.pop().unwrap();
-                        let lhs = self.stack.pop().unwrap();
-                        match arith(op, lhs, rhs) {
-                            Ok(v) => self.stack.push(v),
+                        // Fast path (26.0.9.0): numeric operands update the
+                        // lhs slot in place — no pop+push pair per binary op.
+                        let li = self.stack.len() - 1;
+                        let r = match (&self.stack[li], rhs) {
+                            (Value::Int(a), Value::Int(b)) => int_arith(op, *a, b).map(Value::Int),
+                            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(f_arith(op, *a, b))),
+                            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(f_arith(op, *a as f64, b))),
+                            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(f_arith(op, *a, b as f64))),
+                            (lhs, rhs) => arith(op, lhs.clone(), rhs),
+                        };
+                        match r {
+                            Ok(v) => self.stack[li] = v,
                             Err(msg) => rt!(op_ip, msg),
                         }
                     }
@@ -362,21 +457,119 @@ impl Vm {
                         let t = read_u16(chunk, &mut ip) as usize;
                         ip = t;
                     }
+                    Op::ForRangeExcl | Op::ForRangeIncl => {
+                        let idx_slot = chunk.code[ip] as usize;
+                        let end_slot = chunk.code[ip + 1] as usize;
+                        let elem_slot = chunk.code[ip + 2] as usize;
+                        ip += 3;
+                        let t = read_u16(chunk, &mut ip) as usize;
+                        // Same comparison semantics as the Less/Le opcodes
+                        // (numbers, strings via num_cmp; None is an error).
+                        let ord = Value::num_cmp(
+                            &self.stack[base + idx_slot],
+                            &self.stack[base + end_slot],
+                        );
+                        let cont = match ord {
+                            Some(ord) => {
+                                use std::cmp::Ordering::*;
+                                if op == Op::ForRangeIncl { ord != Greater } else { ord == Less }
+                            }
+                            None => rt!(op_ip, format!(
+                                "cannot compare {} and {} with '{}'",
+                                self.stack[base + idx_slot].type_name(),
+                                self.stack[base + end_slot].type_name(),
+                                if op == Op::ForRangeIncl { "<=" } else { "<" },
+                            )),
+                        };
+                        if cont {
+                            let v = self.stack[base + idx_slot].clone();
+                            self.stack[base + elem_slot] = v;
+                        } else {
+                            ip = t;
+                        }
+                    }
+                    Op::ForArray => {
+                        let iter_slot = chunk.code[ip] as usize;
+                        let idx_slot = chunk.code[ip + 1] as usize;
+                        let elem_slot = chunk.code[ip + 2] as usize;
+                        ip += 3;
+                        let t = read_u16(chunk, &mut ip) as usize;
+                        let n = match &self.stack[base + iter_slot] {
+                            // the same error ArrayLen used to raise
+                            Value::Array(a) => a.borrow().len() as i64,
+                            other => rt!(op_ip, format!(
+                                "for-in requires an array, got {}",
+                                other.type_name()
+                            )),
+                        };
+                        let idx = match &self.stack[base + idx_slot] {
+                            Value::Int(i) => *i,
+                            _ => rt_fatal!(op_ip, "internal error: for-in index is not an int"),
+                        };
+                        if idx < n {
+                            let obj = self.stack[base + iter_slot].clone();
+                            let v = match index_get(obj, Value::Int(idx)) {
+                                Ok(v) => v,
+                                Err(msg) => rt!(op_ip, msg),
+                            };
+                            self.stack[base + elem_slot] = v;
+                        } else {
+                            ip = t;
+                        }
+                    }
                     Op::JumpIfFalsePeek | Op::JumpIfTruePeek => {
                         let t = read_u16(chunk, &mut ip) as usize;
-                        let v = self.stack.last().cloned().unwrap_or(Value::Null);
-                        match v {
-                            Value::Bool(b) => {
-                                let jump = if op == Op::JumpIfFalsePeek { !b } else { b };
-                                if jump {
-                                    ip = t;
-                                }
+                        let jump = match self.stack.last() {
+                            Some(Value::Bool(b)) => {
+                                if op == Op::JumpIfFalsePeek { !*b } else { *b }
                             }
-                            other => rt!(op_ip, format!(
+                            Some(other) => rt!(op_ip, format!(
                                 "expected a bool, got {} (conditions and '&&'/'||' operands must be bool)",
                                 other.type_name()
                             )),
+                            None => rt_fatal!(op_ip, "internal error: stack underflow in JumpIfFalsePeek"),
+                        };
+                        if jump {
+                            ip = t;
                         }
+                    }
+                    Op::JumpIfFalsePop => {
+                        // Fused statement condition: the value is consumed on
+                        // both paths (26.0.9.0).
+                        let t = read_u16(chunk, &mut ip) as usize;
+                        let jump = match self.stack.pop() {
+                            Some(Value::Bool(b)) => !b,
+                            Some(other) => rt!(op_ip, format!(
+                                "expected a bool, got {} (conditions and '&&'/'||' operands must be bool)",
+                                other.type_name()
+                            )),
+                            None => rt_fatal!(op_ip, "internal error: stack underflow in JumpIfFalsePop"),
+                        };
+                        let new_len = self.stack.len();
+                        self.close_upvalues_ge(new_len);
+                        if jump {
+                            ip = t;
+                        }
+                    }
+                    Op::IncLocal => {
+                        let slot = chunk.code[ip] as usize;
+                        ip += 1;
+                        let ci = read_u16(chunk, &mut ip);
+                        let v = self.stack[base + slot].clone();
+                        let new_v = match (&v, &chunk.consts[ci as usize]) {
+                            (Value::Int(a), Value::Int(b)) => match a.checked_add(*b) {
+                                Some(r) => Value::Int(r),
+                                None => rt!(op_ip, "integer overflow in '+'"),
+                            },
+                            (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
+                            (Value::Int(a), Value::Float(b)) => Value::Float(*a as f64 + *b),
+                            (Value::Float(a), Value::Int(b)) => Value::Float(a + *b as f64),
+                            (other, _) => rt!(op_ip, format!(
+                                "loop counter must be a number, got {}",
+                                other.type_name()
+                            )),
+                        };
+                        self.stack[base + slot] = new_v;
                     }
                     Op::Loop => {
                         let t = read_u16(chunk, &mut ip) as usize;
@@ -392,10 +585,17 @@ impl Vm {
                         let callee = self.stack[callee_pos].clone();
                         match callee {
                             Value::Native(native) => {
-                                let args: Vec<Value> =
-                                    self.stack.drain(callee_pos + 1..).collect();
+                                // Move the arguments into a reusable buffer
+                                // (grown once, never re-allocated steady state)
+                                // and hand the native a slice — no Vec
+                                // allocation per call (26.0.9.0).
+                                let mut args = std::mem::take(&mut self.native_args);
+                                args.clear();
+                                args.extend(self.stack.drain(callee_pos + 1..));
                                 self.stack.truncate(callee_pos);
-                                let res = (native.func)(self, args);
+                                let res = (native.func)(self, &args);
+                                args.clear();
+                                self.native_args = args;
                                 match res {
                                     Ok(v) => self.stack.push(v),
                                     Err(msg) => rt!(op_ip, msg),
@@ -440,7 +640,7 @@ impl Vm {
                             self.stack.truncate(callee_pos);
                             let class = Value::Map(Rc::clone(m));
                             let instance = Value::Map(Rc::new(RefCell::new(
-                                [("__class__".to_string(), class.clone())]
+                                [(Rc::from("__class__") as Rc<str>, class.clone())]
                                     .into_iter()
                                     .collect(),
                             )));
@@ -529,7 +729,7 @@ impl Vm {
                         // the importer's globals.
                         let value = match frame.module {
                             Some(ctx) => {
-                                let mut map = HashMap::new();
+                                let mut map = crate::value::ValueMap::default();
                                 for (k, cell) in std::mem::take(&mut self.globals) {
                                     if !matches!(cell.value, Value::Native(_)) {
                                         map.insert(k, cell.value);
@@ -569,11 +769,11 @@ impl Vm {
                             pairs.push((k, v));
                         }
                         pairs.reverse();
-                        let mut map = HashMap::with_capacity(n);
+                        let mut map = crate::value::ValueMap::with_capacity_and_hasher(n, Default::default());
                         for (k, v) in pairs {
                             match k {
                                 Value::Str(s) => {
-                                    map.insert(s.to_string(), v);
+                                    map.insert(s, v);
                                 }
                                 other => rt!(op_ip, format!(
                                     "map keys must be strings, got {}",
@@ -612,13 +812,13 @@ impl Vm {
                         let obj_pos = self.stack.len() - argc - 2;
                         let obj = self.stack[obj_pos].clone();
                         let key = match &self.stack[obj_pos + 1] {
-                            Value::Str(k) => k.to_string(),
+                            Value::Str(k) => Rc::clone(k),
                             _ => rt_fatal!(op_ip, "internal error: method name must be a string"),
                         };
                         let (f, bound_self) = match &obj {
                             Value::Map(m) => {
                                 let mref = m.borrow();
-                                if let Some(v) = mref.get(&key) {
+                                if let Some(v) = mref.get(&*key) {
                                     match v {
                                         Value::Func(f) => (Rc::clone(f), None),
                                         other => rt!(op_ip, format!(
@@ -835,7 +1035,7 @@ impl Vm {
                             self.stack.push(m.clone());
                         } else {
                             let saved_globals = std::mem::take(&mut self.globals);
-                            self.globals = HashMap::new();
+                            self.globals = HashMap::default();
                             crate::builtins::install(self);
                             self.frames.last_mut().unwrap().ip = ip;
                             let func = Rc::new(FunctionVal { proto, upvalues: Vec::new() });
@@ -975,60 +1175,58 @@ fn read_u16(chunk: &Chunk, ip: &mut usize) -> u16 {
     v
 }
 
-/// Arithmetic for the Add/Sub/Mul/Div/Mod opcodes. Ints are exact (with
-/// overflow and division-by-zero errors); mixing int and float promotes to
-/// float; `+` also concatenates strings and arrays.
-fn arith(op: Op, lhs: Value, rhs: Value) -> Result<Value, String> {
-    let symbol = match op {
+fn arith_symbol(op: Op) -> &'static str {
+    match op {
         Op::Add => "+",
         Op::Sub => "-",
         Op::Mul => "*",
         Op::Div => "/",
         _ => "%",
-    };
-    let int_op = |a: i64, b: i64| -> Result<i64, String> {
-        let r = match op {
-            Op::Add => a.checked_add(b),
-            Op::Sub => a.checked_sub(b),
-            Op::Mul => a.checked_mul(b),
-            Op::Div => {
-                if b == 0 {
-                    return Err("division by zero".to_string());
-                }
-                a.checked_div(b)
+    }
+}
+
+/// Checked int arithmetic for the Add/Sub/Mul/Div/Mod opcodes.
+fn int_arith(op: Op, a: i64, b: i64) -> Result<i64, String> {
+    let r = match op {
+        Op::Add => a.checked_add(b),
+        Op::Sub => a.checked_sub(b),
+        Op::Mul => a.checked_mul(b),
+        Op::Div => {
+            if b == 0 {
+                return Err("division by zero".to_string());
             }
-            _ => {
-                if b == 0 {
-                    return Err("modulo by zero".to_string());
-                }
-                a.checked_rem(b)
+            a.checked_div(b)
+        }
+        _ => {
+            if b == 0 {
+                return Err("modulo by zero".to_string());
             }
-        };
-        r.ok_or_else(|| format!("integer overflow in '{symbol}'"))
+            a.checked_rem(b)
+        }
     };
+    r.ok_or_else(|| format!("integer overflow in '{}'", arith_symbol(op)))
+}
+
+/// Float arithmetic for the Add/Sub/Mul/Div/Mod opcodes.
+fn f_arith(op: Op, a: f64, b: f64) -> f64 {
+    match op {
+        Op::Add => a + b,
+        Op::Sub => a - b,
+        Op::Mul => a * b,
+        Op::Div => a / b,
+        _ => a % b,
+    }
+}
+
+/// Arithmetic for the Add/Sub/Mul/Div/Mod opcodes. Ints are exact (with
+/// overflow and division-by-zero errors); mixing int and float promotes to
+/// float; `+` also concatenates strings and arrays.
+fn arith(op: Op, lhs: Value, rhs: Value) -> Result<Value, String> {
     match (lhs, rhs) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_op(a, b)?)),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(match op {
-            Op::Add => a + b,
-            Op::Sub => a - b,
-            Op::Mul => a * b,
-            Op::Div => a / b,
-            _ => a % b,
-        })),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(match op {
-            Op::Add => a as f64 + b,
-            Op::Sub => a as f64 - b,
-            Op::Mul => a as f64 * b,
-            Op::Div => a as f64 / b,
-            _ => a as f64 % b,
-        })),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(match op {
-            Op::Add => a + b as f64,
-            Op::Sub => a - b as f64,
-            Op::Mul => a * b as f64,
-            Op::Div => a / b as f64,
-            _ => a % b as f64,
-        })),
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_arith(op, a, b)?)),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(f_arith(op, a, b))),
+        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(f_arith(op, a as f64, b))),
+        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(f_arith(op, a, b as f64))),
         (Value::Str(a), Value::Str(b)) if op == Op::Add => {
             let mut s = String::with_capacity(a.len() + b.len());
             s.push_str(&a);
@@ -1041,7 +1239,8 @@ fn arith(op: Op, lhs: Value, rhs: Value) -> Result<Value, String> {
             Ok(Value::Array(Rc::new(RefCell::new(items))))
         }
         (a, b) => Err(format!(
-            "unsupported operand types for '{symbol}': {} and {}",
+            "unsupported operand types for '{}': {} and {}",
+            arith_symbol(op),
             a.type_name(),
             b.type_name()
         )),
@@ -1166,7 +1365,7 @@ fn index_set(obj: Value, idx: Value, value: Value) -> Result<(), String> {
             Ok(())
         }
         (Value::Map(m), Value::Str(k)) => {
-            m.borrow_mut().insert(k.to_string(), value);
+            m.borrow_mut().insert(k, value);
             Ok(())
         }
         (obj, idx) => Err(format!(

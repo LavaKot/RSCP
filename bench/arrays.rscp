@@ -1,0 +1,11 @@
+# Arrays: build with push, then several indexed passes.
+var a = []
+for i in 0..500_000 { push(a, i * 3) }
+
+var sum = 0
+for v in a { sum += v }
+
+var sum2 = 0
+for i in 0..len(a) { sum2 += a[i] }
+
+println(sum, sum2, len(a))

@@ -1,0 +1,116 @@
+//! A small, fast, non-cryptographic hasher for the interpreter's hash maps
+//! (globals, user maps) — a close relative of FxHash used by rustc itself.
+//!
+//! The default `SipHash 1-3` protects hash maps against collision attacks;
+//! for interpreter internals and user `map` values the keys are program
+//! literals, not adversarial input, so we trade the DoS resistance for
+//! roughly 5-10x faster hashing. Short string keys (variable names like
+//! `"total"`) go from ~25 ns per lookup to a few ns, which is a measurable
+//! share of every global read and `m.key` access.
+//!
+//! No `unsafe`, no dependencies — ~40 lines of `std`.
+
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// FxHash-style: rotate-xor the value in, then multiply by a large prime.
+#[derive(Default)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+const SEED: u64 = 0x517cc1b727220a95;
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ w).wrapping_mul(SEED);
+    }
+}
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut b = bytes;
+        while b.len() >= 8 {
+            let mut chunk = [0u8; 8];
+            chunk.copy_from_slice(&b[..8]);
+            self.add(u64::from_le_bytes(chunk));
+            b = &b[8..];
+        }
+        if b.len() >= 4 {
+            let mut chunk = [0u8; 4];
+            chunk.copy_from_slice(&b[..4]);
+            self.add(u32::from_le_bytes(chunk) as u64);
+            b = &b[4..];
+        }
+        if !b.is_empty() {
+            // fold the tail byte-wise into one word (1-3 bytes)
+            let mut w = 0u64;
+            for (i, byte) in b.iter().enumerate() {
+                w |= u64::from(*byte) << (8 * i);
+            }
+            self.add(w);
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.add(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(u64::from(i));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+/// Builder that produces [`FxHasher`]s; use as the third type parameter of
+/// `HashMap`/`HashSet`: `HashMap<K, V, FxBuild>`.
+pub type FxBuild = BuildHasherDefault<FxHasher>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn hashes_consistently() {
+        let mut m: HashMap<String, u32, FxBuild> = HashMap::default();
+        m.insert("total".to_string(), 1);
+        m.insert("".to_string(), 2);
+        m.insert("a longer key for the tail paths 1234567".to_string(), 3);
+        assert_eq!(m.get("total"), Some(&1));
+        assert_eq!(m.get(""), Some(&2));
+        assert_eq!(m.get("a longer key for the tail paths 1234567"), Some(&3));
+        assert_eq!(m.get("missing"), None);
+    }
+
+    #[test]
+    fn write_and_write_u_agree_for_u64() {
+        let mut h1 = FxHasher::default();
+        let mut h2 = FxHasher::default();
+        h1.write_u64(0x0123_4567_89ab_cdef);
+        h2.write(&0x0123_4567_89ab_cdefu64.to_le_bytes());
+        assert_eq!(h1.finish(), h2.finish());
+    }
+}

@@ -104,9 +104,27 @@ pub enum Op {
     SuperMethod,
     /// a instanceof B
     InstanceOf,
+    /// pop top; jump to u16 if it is `false` (errors on non-bool). The fused
+    /// statement-condition form: replaces a `JumpIfFalsePeek` followed by
+    /// `Pop` on both paths, so conditions cost one dispatch less (26.0.9.0).
+    JumpIfFalsePop,
+    /// stack[base + u8] += consts[u16] (checked int/float add) — the loop
+    /// counter increment of a range `for`
+    IncLocal,
+    /// Range `for` head (exclusive): compare locals idx/end (u8, u8),
+    /// copy idx into the loop variable (u8) and fall through, or jump to
+    /// the u16 exit. One dispatch instead of GetLocal+GetLocal+Less+
+    /// JumpIfFalsePop+MoveLocal (26.0.9.0).
+    ForRangeExcl,
+    /// Range `for` head, inclusive end (`..=`).
+    ForRangeIncl,
+    /// Array `for` head: if idx < len(iter) (u8, u8), store iter[idx] into
+    /// the loop variable (u8) and fall through, else jump to the u16 exit.
+    /// Replaces nine dispatches per iteration (26.0.9.0).
+    ForArray,
 }
 
-const ALL_OPS: [Op; 57] = [
+const ALL_OPS: [Op; 62] = [
     Op::Constant,
     Op::Null,
     Op::True,
@@ -164,6 +182,11 @@ const ALL_OPS: [Op; 57] = [
     Op::CallMethod,
     Op::SuperMethod,
     Op::InstanceOf,
+    Op::JumpIfFalsePop,
+    Op::IncLocal,
+    Op::ForRangeExcl,
+    Op::ForRangeIncl,
+    Op::ForArray,
 ];
 
 impl Op {
@@ -230,6 +253,11 @@ impl Op {
             Op::CallMethod => "CallMethod",
             Op::SuperMethod => "SuperMethod",
             Op::InstanceOf => "InstanceOf",
+            Op::JumpIfFalsePop => "JumpIfFalsePop",
+            Op::IncLocal => "IncLocal",
+            Op::ForRangeExcl => "ForRangeExcl",
+            Op::ForRangeIncl => "ForRangeIncl",
+            Op::ForArray => "ForArray",
         }
     }
 
@@ -248,12 +276,15 @@ impl Op {
             | Op::Jump
             | Op::JumpIfFalsePeek
             | Op::JumpIfTruePeek
+            | Op::JumpIfFalsePop
             | Op::Loop
             | Op::Closure
             | Op::TryCatch
             | Op::SuperMethod
             | Op::Array
             | Op::Map => Operand::U16,
+            Op::IncLocal => Operand::U8U16,
+            Op::ForRangeExcl | Op::ForRangeIncl | Op::ForArray => Operand::U8U8U8U16,
             _ => Operand::None,
         }
     }
@@ -265,6 +296,10 @@ pub enum Operand {
     None,
     U8,
     U16,
+    /// u8 slot, u16 const index
+    U8U16,
+    /// u8 slot, u8 slot, u8 slot, u16 jump target
+    U8U8U8U16,
 }
 
 
@@ -335,6 +370,43 @@ impl Chunk {
         let i = self.emit(op, line, col);
         self.code.push((v & 0xff) as u8);
         self.code.push((v >> 8) as u8);
+        self.at(line, col);
+        self.at(line, col);
+        i
+    }
+
+    /// Emit an opcode with a u8 operand followed by a u16 (little-endian).
+    pub fn emit_op_u8_u16(&mut self, op: Op, a: u8, v: u16, line: usize, col: usize) -> usize {
+        let i = self.emit(op, line, col);
+        self.code.push(a);
+        self.code.push((v & 0xff) as u8);
+        self.code.push((v >> 8) as u8);
+        self.at(line, col);
+        self.at(line, col);
+        self.at(line, col);
+        i
+    }
+
+    /// Emit an opcode with three u8 operands and a u16 (little-endian).
+    pub fn emit_op_u8_u8_u8_u16(
+        &mut self,
+        op: Op,
+        a: u8,
+        b: u8,
+        c: u8,
+        v: u16,
+        line: usize,
+        col: usize,
+    ) -> usize {
+        let i = self.emit(op, line, col);
+        self.code.push(a);
+        self.code.push(b);
+        self.code.push(c);
+        self.code.push((v & 0xff) as u8);
+        self.code.push((v >> 8) as u8);
+        self.at(line, col);
+        self.at(line, col);
+        self.at(line, col);
         self.at(line, col);
         self.at(line, col);
         i
@@ -430,7 +502,12 @@ fn disasm_one(p: &FnProto, out: &mut String) {
                             const_repr(&chunk.consts[v as usize])
                         ));
                     }
-                    Op::Jump | Op::JumpIfFalsePeek | Op::JumpIfTruePeek | Op::Loop | Op::TryCatch => {
+                    Op::Jump
+                    | Op::JumpIfFalsePeek
+                    | Op::JumpIfTruePeek
+                    | Op::JumpIfFalsePop
+                    | Op::Loop
+                    | Op::TryCatch => {
                         text.push_str(&format!("        ; -> {v}"));
                     }
                     Op::Closure => {
@@ -444,6 +521,25 @@ fn disasm_one(p: &FnProto, out: &mut String) {
                     }
                     _ => {}
                 }
+            }
+            Operand::U8U16 => {
+                let a = chunk.code[ip];
+                let b = u16::from(chunk.code[ip + 1]) | (u16::from(chunk.code[ip + 2]) << 8);
+                ip += 3;
+                text.push_str(&format!(" {a} {b}"));
+                if op == Op::IncLocal {
+                    text.push_str(&format!(
+                        "        ; {}",
+                        const_repr(&chunk.consts[b as usize])
+                    ));
+                }
+            }
+            Operand::U8U8U8U16 => {
+                let (a, b, c) = (chunk.code[ip], chunk.code[ip + 1], chunk.code[ip + 2]);
+                let t = u16::from(chunk.code[ip + 3]) | (u16::from(chunk.code[ip + 4]) << 8);
+                ip += 5;
+                text.push_str(&format!(" {a} {b} {c} {t}"));
+                text.push_str(&format!("        ; -> {t}"));
             }
         }
         if op == Op::Closure {

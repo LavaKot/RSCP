@@ -51,9 +51,10 @@ in `examples/` and `tests/cases/`.
   and division by zero are clean errors, not silent wraps. Skills and
   habits transfer in both directions.
 * **A real compiler, not a tree-walker.** Programs compile once into a
-  chunk of 57 one-byte opcodes; the VM is a tight dispatch loop. `for`
-  compiles to a counted loop and `match` to a jump chain — no allocations
-  in the hot path.
+  chunk of 62 one-byte opcodes; the VM is a tight dispatch loop. A `for`
+  loop runs on **fused instructions** — the whole loop head (compare,
+  branch, element refresh) is one opcode, and a pure counted loop costs
+  ~18 ns per iteration.
 * **Batteries included.** Classes with inheritance, modules, `try`/`catch`,
   30+ builtins (`split`, `replace`, `keys`, `assert`, …) and a REPL ship in
   the box — no standard library to install first.
@@ -148,7 +149,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.8.0 — enter statements, Ctrl-D to exit.
+rscp 26.0.9.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -164,7 +165,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.8.0.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.9.0.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -200,7 +201,8 @@ source (.rscp) ──► lexer ──► parser ──► compiler ──► byt
 | `src/parser.rscp` | recursive descent + precedence climbing |
 | `src/fmt.rscp`    | `rscp fmt` — token-level formatter |
 | `src/errors.rscp` | unified error type, source-annotated rendering |
-| `src/bytecode.rscp` | 57 opcodes, chunks, prototypes, disassembler |
+| `src/fxhash.rscp` | FxHash-style hasher for globals and maps |
+| `src/bytecode.rscp` | 62 opcodes, chunks, prototypes, disassembler |
 | `src/compiler.rscp` | AST → bytecode; locals, upvalue capture, loop patching |
 | `src/value.rscp`  | runtime values (`Rc`/`RefCell` reference types) |
 | `src/vm.rscp`     | stack machine: frames, call stack, upvalue closing |
@@ -210,9 +212,10 @@ source (.rscp) ──► lexer ──► parser ──► compiler ──► byt
 Design highlights:
 
 * **Bytecode, not tree-walking.** Programs compile once into a `Chunk` of
-  57 one-byte opcodes (with `u8`/`u16` operands); the VM is a tight dispatch
+  62 one-byte opcodes (with `u8`/`u16` operands); the VM is a tight dispatch
   loop over call frames. `for i in 0..n` compiles to a counted loop — no
-  array is built — and `match` compiles to a jump chain.
+  array is built — whose head is a single fused instruction, and `match`
+  compiles to a jump chain.
 * **Proper closures.** Captured locals are shared *upvalue* cells that stay
   "open" (pointing into the stack) while the defining scope runs and close
   (copying the value out) when it returns — two closures made in the same
@@ -226,6 +229,47 @@ Design highlights:
 
 Implementation limits (locals per function, constants per chunk, …) are
 listed in the [docs](https://github.com/LavaKot/RSCP-docs).
+
+---
+
+## Performance
+
+26.0.9.0 was a dedicated speed release: no new syntax — the same programs
+run faster. Measured with `bench/bench.py` (best of 5 runs, x86-64 Linux,
+26.0.8.0 as the baseline):
+
+| Workload                        | 26.0.8.0 | 26.0.9.0 | Speedup |
+|---------------------------------|---------:|---------:|--------:|
+| `fib(30)` — recursion, 2.7M calls | 468 ms | 388 ms | 1.21× |
+| 10M-iteration arithmetic loop   | 2772 ms  | 1593 ms  | 1.74× |
+| global read-modify-write ×2M    | 380 ms   | 128 ms   | 2.98× |
+| array build + two indexed passes | 375 ms | 166 ms   | 2.26× |
+| map dot-access (`m.a = i`, …)   | 416 ms   | 207 ms   | 2.01× |
+| 3M method calls (OOP)           | 1452 ms  | 908 ms   | 1.60× |
+| string split/join/replace/find  | 119 ms   | 88 ms    | 1.36× |
+| printing 100k lines (piped)     | 105 ms   | 22 ms    | 4.82× |
+| **geometric mean**              |          |          | **1.89×** |
+
+A pure counted loop (`for i in 0..10_000_000 { }`) went from ~52 to
+~18 ns per iteration. What changed under the hood:
+
+* **No allocations on name lookups.** Global and map keys became `Rc<str>`
+  (a lookup moves a refcount, not a heap block), and SipHash gave way to an
+  FxHash-style hasher (`src/fxhash.rscp`) — the same family rustc uses.
+* **Fused loop instructions.** The whole `for` head — compare, branch,
+  loop-variable refresh — is one opcode (`ForRange`/`ForArray`), the counter
+  bump is one more (`IncLocal`), and statement conditions pop the bool right
+  in the jump (`JumpIfFalsePop`). A range loop runs 3 dispatches per
+  iteration where it used to run 7; an array loop 3 instead of 9.
+* **In-place arithmetic and comparisons** — binary ops update the operand
+  slot instead of a pop/push pair.
+* **Reusable argument buffer** for native calls (no `Vec` allocation per
+  `push`/`str`/`join`/… call).
+* **Block-buffered stdout when piped** (like Python), line-buffered on a
+  terminal, with the same quiet `exit 141` on broken pipes.
+
+Reproduce with `python3 bench/bench.py target/release/rscp` — the suite
+ships in `bench/`.
 
 ---
 
@@ -244,30 +288,43 @@ and stderr pinned), and the CLI surface itself. The 12 showcase examples in
 
 ## Versioning
 
-RSCP versions are four numbers: **`YY.0.MINOR.PATCH`** (until this release
-the scheme was `YEAR.MAJOR.MINOR.PATCH` — `2026.6.0.0` — and the minor
-counter carries over; this is feature release #7).
+RSCP versions are four numbers: **`YY.0.MINOR.PATCH`** (until 26.0.7.0 the
+scheme was `YEAR.MAJOR.MINOR.PATCH` — `2026.6.0.0` — and the minor counter
+carries over; this is feature release #9).
 
 | Number | Counts what | Example |
 |--------|-------------|---------|
 | 1st | year, short form (26 = 2026) | `26` |
 | 2nd | `0` while RSCP is in beta, `1` from the first stable release | `0` |
-| 3rd | feature releases — one number per shipped feature set | `7` |
+| 3rd | feature releases — one number per shipped feature set | `9` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So this release is `26.0.7.0` (`v26.0.8.0`); a hotfix on top of it would be
-`26.0.7.1`, and the next feature release `26.0.8.0`. While the second
+So this release is `26.0.9.0` (`v26.0.9.0`); a hotfix on top of it would be
+`26.0.9.1`, and the next feature release `26.0.10.0`. While the second
 number is `0`, GitHub releases are titled **"Beta …"** (e.g. "Beta
-26.0.7.0"); from the first stable release the prefix disappears.
+26.0.9.0"); from the first stable release the prefix disappears.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`26.0.8` in this release). The full four-number version lives in
+(`26.0.9` in this release). The full four-number version lives in
 `rscp version`, the REPL banner, release tags, release file names and this
 README.
 
 ## Changelog
 
+* **26.0.9.0** — the speed release: **1.89× faster on average (geometric
+  mean), up to 4.8× on printing** — see the new Performance section for the
+  full table. No new syntax: the same programs run faster. Global and map
+  lookups stopped allocating (`Rc<str>` keys everywhere) and switched from
+  SipHash to an FxHash-style hasher; `for` loop heads compile to single
+  fused instructions (`JumpIfFalsePop`, `IncLocal`, `ForRange…`, `ForArray`
+  — 62 opcodes now), so a pure counted loop runs ~18 ns per iteration
+  (was ~52); binary ops and comparisons update stack slots in place;
+  native calls reuse an argument buffer instead of allocating a `Vec` per
+  call; stdout is block-buffered when piped (like Python) with the same
+  line-buffered terminal behavior and the same quiet `exit 141` on broken
+  pipes. A 9-workload benchmark suite now ships in `bench/`. 67 unit tests,
+  106 golden cases.
 * **26.0.8.0** — `rscp` works right after install, like `python`. The
   Windows installer (and the new `add-to-path.cmd` in the zip) now puts an
   instant alias — a copy of `rscp.exe` — into

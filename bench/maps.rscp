@@ -1,0 +1,17 @@
+# Maps: dot access (string-keyed hashing) in a hot loop, plus a wide map.
+var m = {"a": 0, "b": 0, "c": 0, "d": 0}
+for i in 0..500_000 {
+    m.a = i
+    m.b = m.a + 1
+    m.c = m.b % 100
+    if m.c == 0 { m.d = m.d + 1 }
+}
+
+var wide = {}
+for i in 0..20_000 {
+    wide[join(["key", str(i % 500)], "-")] = i
+}
+var wsum = 0
+for k in keys(wide) { wsum += wide[k] }
+
+println(m.a, m.b, m.c, m.d, wsum, len(wide))

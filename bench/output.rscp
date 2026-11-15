@@ -1,0 +1,4 @@
+# Output: printing 100k lines (the classic "loop with print" script).
+for i in 0..100_000 {
+    println("line ", i)
+}

@@ -1,0 +1,10 @@
+# Globals: read-modify-write of a top-level var in a hot loop - measures
+# GetGlobal/SetGlobal (name lookup) speed.
+var acc = 0
+fn bump(n) {
+    for _i in 0..n {
+        acc = acc + 1
+    }
+    return acc
+}
+println(bump(2_000_000))

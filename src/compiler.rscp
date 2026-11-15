@@ -177,6 +177,10 @@ impl Compiler {
         self.cur().proto.chunk.emit_op_u8(op, v, line, col)
     }
 
+    fn emit_u8_u16(&mut self, op: Op, a: u8, v: u16, line: usize, col: usize) -> usize {
+        self.cur().proto.chunk.emit_op_u8_u16(op, a, v, line, col)
+    }
+
     fn emit_u16(&mut self, op: Op, v: u16, line: usize, col: usize) -> usize {
         self.cur().proto.chunk.emit_op_u16(op, v, line, col)
     }
@@ -208,6 +212,25 @@ impl Compiler {
         }
         self.cur().proto.chunk.patch_u16(site, target);
         Ok(())
+    }
+
+    /// Patch the u16 operand that starts at the absolute byte position
+    /// `at` (used by the fused for-heads, whose target sits at opcode+4).
+    fn patch_u16_at(&mut self, at: usize, line: usize, col: usize) -> Result<(), RscpError> {
+        let target = self.cur_len();
+        if target >= MAX_CODE {
+            return Err(self.err("function is too large (bytecode exceeds 64 KiB)", line, col));
+        }
+        self.cur().proto.chunk.patch_u16(at, target);
+        Ok(())
+    }
+
+    /// Emit a fused for-head: three u8 slots and a placeholder u16 target.
+    fn emit_for_head(&mut self, op: Op, a: u8, b: u8, c: u8, line: usize, col: usize) -> Result<usize, RscpError> {
+        if self.cur_len() >= MAX_CODE {
+            return Err(self.err("function is too large (bytecode exceeds 64 KiB)", line, col));
+        }
+        Ok(self.cur().proto.chunk.emit_op_u8_u8_u8_u16(op, a, b, c, 0, line, col))
     }
 
     fn constant(&mut self, v: Value, line: usize, col: usize) -> Result<u16, RscpError> {
@@ -465,13 +488,13 @@ impl Compiler {
             }
             StmtKind::If { cond, then, els } => {
                 self.expr(cond)?;
-                let jelse = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
-                self.emit(Op::Pop, s.line, s.col);
+                // Fused form (26.0.9.0): the jump pops the condition itself
+                // on both paths, saving the Pop dispatch.
+                let jelse = self.emit_jump(Op::JumpIfFalsePop, s.line, s.col)?;
                 self.drop_temps(1);
                 self.stmt(then)?;
                 let jend = self.emit_jump(Op::Jump, s.line, s.col)?;
                 self.patch_jump(jelse, s.line, s.col)?;
-                self.emit(Op::Pop, s.line, s.col);
                 self.drop_temps(1);
                 if let Some(e) = els {
                     self.stmt(e)?;
@@ -481,8 +504,7 @@ impl Compiler {
             StmtKind::While { cond, body } => {
                 let cond_start = self.cur_len();
                 self.expr(cond)?;
-                let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
-                self.emit(Op::Pop, s.line, s.col);
+                let jend = self.emit_jump(Op::JumpIfFalsePop, s.line, s.col)?;
                 self.drop_temps(1);
 
                 let locals_at_entry = self.cur_locals();
@@ -501,7 +523,6 @@ impl Compiler {
 
                 self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
                 self.patch_jump(jend, s.line, s.col)?;
-                self.emit(Op::Pop, s.line, s.col);
                 self.drop_temps(1);
                 for b in ctx.breaks {
                     self.patch_jump(b, s.line, s.col)?;
@@ -521,8 +542,7 @@ impl Compiler {
                         self.push_temp();
                     }
                 }
-                let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
-                self.emit(Op::Pop, s.line, s.col);
+                let jend = self.emit_jump(Op::JumpIfFalsePop, s.line, s.col)?;
                 self.drop_temps(1);
 
                 self.loops.push(LoopCtx {
@@ -545,7 +565,6 @@ impl Compiler {
 
                 self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
                 self.patch_jump(jend, s.line, s.col)?;
-                self.emit(Op::Pop, s.line, s.col);
                 self.drop_temps(1);
                 for c in ctx.conts {
                     self.patch_to(c, step_start);
@@ -566,19 +585,18 @@ impl Compiler {
                     let idx_slot = self.declare_local(INDEX_LOCAL, true, iline, icol)?;
                     self.expr(end)?;
                     let end_slot = self.declare_local(RANGE_END_LOCAL, false, iline, icol)?;
-                    // Placeholder cell for the loop variable, filled by
-                    // SetLocal at the top of each iteration.
+                    // Placeholder cell for the loop variable, filled by the fused
+                    // ForRange head at the top of each iteration.
                     self.emit(Op::Null, s.line, s.col);
                     self.push_temp();
                     let elem_slot = self.declare_local(name, *mutable, s.line, s.col)?;
 
                     let cond_start = self.cur_len();
-                    self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
-                    self.emit_u8(Op::GetLocal, end_slot, s.line, s.col);
-                    let cmp = if *inclusive { Op::Le } else { Op::Less };
-                    self.emit(cmp, s.line, s.col);
-                    let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
-                    self.emit(Op::Pop, s.line, s.col);
+                    // The whole loop head is one fused instruction (26.0.9.0):
+                    // compare the counter with the end, refresh the loop
+                    // variable, branch out when done.
+                    let head_op = if *inclusive { Op::ForRangeIncl } else { Op::ForRangeExcl };
+                    let head_site = self.emit_for_head(head_op, idx_slot, end_slot, elem_slot, s.line, s.col)?;
 
                     self.loops.push(LoopCtx {
                         fn_depth: self.fns.len(),
@@ -591,21 +609,15 @@ impl Compiler {
                         cont_target: None,
                     });
 
-                    self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
-                    self.emit_u8(Op::SetLocal, elem_slot, s.line, s.col);
                     self.stmt(body)?;
 
                     let step_start = self.cur_len();
-                    self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
                     let one_ci = self.int_const(1, s.line, s.col)?;
-                    self.emit_u16(Op::Constant, one_ci, s.line, s.col);
-                    self.emit(Op::Add, s.line, s.col);
-                    self.emit_u8(Op::SetLocal, idx_slot, s.line, s.col);
+                    self.emit_u8_u16(Op::IncLocal, idx_slot, one_ci, s.line, s.col);
 
                     let ctx = self.loops.pop().unwrap();
                     self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
-                    self.patch_jump(jend, s.line, s.col)?;
-                    self.emit(Op::Pop, s.line, s.col);
+                    self.patch_u16_at(head_site + 3, s.line, s.col)?;
                     for c in ctx.conts {
                         self.patch_to(c, step_start);
                     }
@@ -630,12 +642,9 @@ impl Compiler {
                 let elem_slot = self.declare_local(name, *mutable, s.line, s.col)?;
 
                 let cond_start = self.cur_len();
-                self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
-                self.emit_u8(Op::GetLocal, iter_slot, s.line, s.col);
-                self.emit(Op::ArrayLen, s.line, s.col);
-                self.emit(Op::Less, s.line, s.col);
-                let jend = self.emit_jump(Op::JumpIfFalsePeek, s.line, s.col)?;
-                self.emit(Op::Pop, s.line, s.col);
+                // Fused array loop head (26.0.9.0): bounds check, element
+                // load and loop-variable refresh in one instruction.
+                let head_site = self.emit_for_head(Op::ForArray, iter_slot, idx_slot, elem_slot, s.line, s.col)?;
 
                 self.loops.push(LoopCtx {
                     fn_depth: self.fns.len(),
@@ -648,25 +657,16 @@ impl Compiler {
                     cont_target: None,
                 });
 
-                // Assign the element into its slot, run the body.
-                self.emit_u8(Op::GetLocal, iter_slot, s.line, s.col);
-                self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
-                self.emit(Op::IndexGet, s.line, s.col);
-                self.emit_u8(Op::SetLocal, elem_slot, s.line, s.col);
                 self.stmt(body)?;
 
                 // Increment the hidden index.
                 let step_start = self.cur_len();
-                self.emit_u8(Op::GetLocal, idx_slot, s.line, s.col);
                 let one_ci = self.int_const(1, s.line, s.col)?;
-                self.emit_u16(Op::Constant, one_ci, s.line, s.col);
-                self.emit(Op::Add, s.line, s.col);
-                self.emit_u8(Op::SetLocal, idx_slot, s.line, s.col);
+                self.emit_u8_u16(Op::IncLocal, idx_slot, one_ci, s.line, s.col);
 
                 let ctx = self.loops.pop().unwrap();
                 self.emit_jump_to(Op::Loop, cond_start, s.line, s.col)?;
-                self.patch_jump(jend, s.line, s.col)?;
-                self.emit(Op::Pop, s.line, s.col);
+                self.patch_u16_at(head_site + 3, s.line, s.col)?;
                 for c in ctx.conts {
                     self.patch_to(c, step_start);
                 }
@@ -1042,13 +1042,13 @@ impl Compiler {
             }
             ExprKind::Ternary { cond, then, els } => {
                 self.expr(cond)?;
-                let jelse = self.emit_jump(Op::JumpIfFalsePeek, e.line, e.col)?;
-                self.emit(Op::Pop, e.line, e.col);
+                // The fused form pops the condition on both paths; each
+                // branch then leaves exactly one value (26.0.9.0).
+                let jelse = self.emit_jump(Op::JumpIfFalsePop, e.line, e.col)?;
                 self.drop_temps(1);
                 self.expr(then)?;
                 let jend = self.emit_jump(Op::Jump, e.line, e.col)?;
                 self.patch_jump(jelse, e.line, e.col)?;
-                self.emit(Op::Pop, e.line, e.col);
                 self.drop_temps(1);
                 self.expr(els)?;
                 self.patch_jump(jend, e.line, e.col)?;
@@ -1288,8 +1288,7 @@ impl Compiler {
             let mut guard_pops = 0usize;
             if let Some(g) = &arm.guard {
                 self.expr(g)?;
-                guard_fail = Some(self.emit_jump(Op::JumpIfFalsePeek, line, col)?);
-                self.emit(Op::Pop, line, col);
+                guard_fail = Some(self.emit_jump(Op::JumpIfFalsePop, line, col)?);
                 self.drop_temps(1);
                 guard_pops = self.cur_locals() - locals_before; // the binding, if any
             }
@@ -1326,9 +1325,8 @@ impl Compiler {
             }
             if let Some(gf) = guard_fail {
                 self.patch_jump(gf, line, col)?;
-                // Pop the peeked guard bool; `pending` already accounts for
-                // it via the true-path Pop above (linear fall-through model).
-                self.emit(Op::Pop, line, col);
+                // The guard bool was already consumed by JumpIfFalsePop on
+                // both paths (26.0.9.0); only the binding cells remain.
                 if guard_pops > 0 {
                     self.emit_u8(Op::PopN, guard_pops as u8, line, col);
                 }
@@ -1555,15 +1553,29 @@ mod tests {
         let proto = compile_src("var i = 0; while i < 3 { i++; }");
         let ops = &proto.chunk.code;
         assert!(ops.contains(&(Op::Loop as u8)));
-        assert!(ops.contains(&(Op::JumpIfFalsePeek as u8)));
+        // Statement conditions use the fused form (26.0.9.0): the jump
+        // itself pops the bool.
+        assert!(ops.contains(&(Op::JumpIfFalsePop as u8)));
     }
 
     #[test]
     fn range_loop_compiles_to_counted_loop() {
-        // `for i in 0..10 { }` must not allocate an array.
+        // `for i in 0..10 { }` must not allocate an array...
         let proto = compile_src("var t = 0\nfor i in 0..10 {\n    t += i\n}\nfor j in 0..=2 { t += j }\n");
         assert!(!proto.chunk.code.contains(&(Op::Array as u8)));
         assert!(proto.chunk.code.contains(&(Op::Loop as u8)));
+        // ...and its head is one fused instruction (26.0.9.0), with the
+        // counter bumped by IncLocal.
+        assert!(proto.chunk.code.contains(&(Op::ForRangeExcl as u8)));
+        assert!(proto.chunk.code.contains(&(Op::ForRangeIncl as u8)));
+        assert!(proto.chunk.code.contains(&(Op::IncLocal as u8)));
+    }
+
+    #[test]
+    fn array_loop_compiles_to_fused_head() {
+        let proto = compile_src("var s = 0\nfor v in [1, 2, 3] {\n    s += v\n}\n");
+        assert!(proto.chunk.code.contains(&(Op::ForArray as u8)));
+        assert!(proto.chunk.code.contains(&(Op::IncLocal as u8)));
     }
 
     #[test]

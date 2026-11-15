@@ -1,0 +1,8 @@
+# A tight arithmetic loop over locals: 10M iterations of add/mul/mod and
+# a conditional, the classic interpreter-bound workload.
+var total = 0
+for i in 0..10_000_000 {
+    let x = i % 7
+    if x == 3 { total += i } else { total += x * 2 }
+}
+println(total)

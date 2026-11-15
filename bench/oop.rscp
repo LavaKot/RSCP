@@ -1,0 +1,15 @@
+# OOP: method dispatch through the class chain, 3M calls.
+class Counter {
+    fn init(start) { self.n = start }
+    fn bump() { self.n = self.n + 1; return self.n }
+    fn get() -> self.n
+}
+
+let c = Counter(0)
+var last = 0
+for _i in 0..1_000_000 {
+    last = c.bump()
+    last = c.bump()
+    last = c.get()
+}
+println(last)

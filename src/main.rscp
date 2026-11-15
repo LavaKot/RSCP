@@ -9,6 +9,7 @@
 #[path = "ast.rscp"] mod ast;
 #[path = "parser.rscp"] mod parser;
 #[path = "fmt.rscp"] mod fmt;
+#[path = "fxhash.rscp"] mod fxhash;
 #[path = "value.rscp"] mod value;
 #[path = "bytecode.rscp"] mod bytecode;
 #[path = "compiler.rscp"] mod compiler;
@@ -17,7 +18,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::process::exit;
 #[cfg(windows)]
 use std::process::Command;
@@ -31,7 +32,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "26.0.8.0";
+const VERSION: &str = "26.0.9.0";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -236,7 +237,15 @@ fn file_command(cmd: &str, path: &str) -> i32 {
                 Err(e) => return report_error(e, path, &source),
             };
             let mut vm = Vm::new();
-            match vm.run_script(proto) {
+            // Full buffering when stdout is a pipe or a file (26.0.9.0):
+            // print-heavy scripts stop paying a flush per line, exactly
+            // like Python. Interactive terminals keep line buffering.
+            if !std::io::stdout().is_terminal() {
+                vm.out = crate::vm::Out::Full(std::io::BufWriter::new(std::io::stdout()));
+            }
+            let result = vm.run_script(proto);
+            vm.out.flush();
+            match result {
                 Ok(()) => 0,
                 Err(e) => report_error(e, path, &source),
             }

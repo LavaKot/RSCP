@@ -1,0 +1,15 @@
+# Strings: concat pieces, split/join/replace/find in a loop.
+var parts = []
+for i in 0..100_000 {
+    push(parts, join(["k", str(i % 1000)], "="))
+}
+
+var joined = join(parts, ";")
+var pieces = split(joined, ";")
+var replaced = replace(joined, "=1", "=2")
+var found = 0
+for p in pieces {
+    if find(p, "9") != -1 { found = found + 1 }
+}
+
+println(len(joined), len(pieces), len(replaced), found)

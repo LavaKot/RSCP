@@ -11,10 +11,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::bytecode::FnProto;
+use crate::fxhash::FxBuild;
 use crate::vm::Vm;
 
-/// A native (Rust-implemented) function.
-pub type NativeFn = fn(&mut Vm, Vec<Value>) -> Result<Value, String>;
+/// A native (Rust-implemented) function. The arguments arrive as a slice
+/// (no per-call Vec allocation since 26.0.9.0).
+pub type NativeFn = fn(&mut Vm, &[Value]) -> Result<Value, String>;
+
+/// User-facing map values: `Rc<str>` keys (inserting a key from a string
+/// value moves the existing `Rc`, no allocation), FxHash for speed.
+pub type ValueMap = HashMap<Rc<str>, Value, FxBuild>;
 
 /// A compiled function plus its captured upvalues.
 pub struct FunctionVal {
@@ -44,7 +50,7 @@ pub enum Value {
     Bool(bool),
     Str(Rc<str>),
     Array(Rc<RefCell<Vec<Value>>>),
-    Map(Rc<RefCell<HashMap<String, Value>>>),
+    Map(Rc<RefCell<ValueMap>>),
     Func(Rc<FunctionVal>),
     Native(Rc<NativeVal>),
     /// Compile-time only: a function prototype stored in a constant pool.
@@ -132,11 +138,11 @@ impl Value {
                     }
                 }
                 let borrowed = m.borrow();
-                let mut keys: Vec<&String> = borrowed.keys().collect();
+                let mut keys: Vec<&Rc<str>> = borrowed.keys().collect();
                 keys.sort();
                 let parts: Vec<String> = keys
                     .iter()
-                    .map(|k| format!("{:?}: {}", k, borrowed[*k].nested_string(depth + 1)))
+                    .map(|k| format!("{:?}: {}", k, borrowed[&***k].nested_string(depth + 1)))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
@@ -200,6 +206,7 @@ fn fn_display_name(p: &FnProto) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::iter::FromIterator;
 
     #[test]
     fn float_formatting() {
@@ -217,10 +224,12 @@ mod tests {
             Value::Float(3.0),
         ])));
         assert_eq!(a.display_string(0), "[1, \"two\", 3.0]");
-        let m = Value::Map(Rc::new(RefCell::new(HashMap::from([
-            ("b".to_string(), Value::Int(2)),
-            ("a".to_string(), Value::Int(1)),
-        ]))));
+        let m = Value::Map(Rc::new(RefCell::new(
+            ValueMap::from_iter([
+                (Rc::from("b"), Value::Int(2)),
+                (Rc::from("a"), Value::Int(1)),
+            ]),
+        )));
         assert_eq!(m.display_string(0), "{\"a\": 1, \"b\": 2}");
     }
 

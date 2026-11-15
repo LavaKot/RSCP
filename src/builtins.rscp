@@ -57,24 +57,26 @@ fn join_display(args: &[Value]) -> String {
         .join(" ")
 }
 
-/// `write(a, ...)` — print without a trailing newline.
-fn n_write(vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+/// `write(a, ...)` — print without a trailing newline. Goes through the
+/// VM's output, which is block-buffered when stdout is a pipe/file
+/// (26.0.9.0): print-heavy scripts stop paying a flush per line.
+fn n_write(vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if !vm.quiet {
-        print!("{}", join_display(&args));
+        vm.out.write_str(&join_display(args));
     }
     Ok(Value::Null)
 }
 
 /// `print(a, ...)` / `println(a, ...)` — print and end the line.
 /// Since 2026.5.5 `print` is the Python-style primary name.
-fn n_println(vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_println(vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if !vm.quiet {
-        println!("{}", join_display(&args));
+        vm.out.write_line(&join_display(args));
     }
     Ok(Value::Null)
 }
 
-fn n_len(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_len(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("len", &args)?;
     let n = match v {
         Value::Str(s) => s.chars().count() as i64,
@@ -90,12 +92,12 @@ fn n_len(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     Ok(Value::Int(n))
 }
 
-fn n_str(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_str(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("str", &args)?;
     Ok(Value::str(v.display_string(0)))
 }
 
-fn n_int(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_int(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("int", &args)?;
     match v {
         Value::Int(i) => Ok(Value::Int(i)),
@@ -118,7 +120,7 @@ fn n_int(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_float(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_float(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("float", &args)?;
     match v {
         Value::Int(i) => Ok(Value::Float(i as f64)),
@@ -135,7 +137,7 @@ fn n_float(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_type(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_type(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("type", &args)?;
     // Instances report their class name; classes report "class" (2026.6.0).
     if let Value::Map(m) = &v {
@@ -160,7 +162,7 @@ fn n_type(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     Ok(Value::str(v.type_name()))
 }
 
-fn n_abs(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_abs(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("abs", &args)?;
     match v {
         Value::Int(i) => i
@@ -190,7 +192,7 @@ fn two_numbers(name: &str, args: &[Value]) -> Result<(Value, Value), String> {
     Ok((args[0].clone(), args[1].clone()))
 }
 
-fn n_min(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_min(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let (a, b) = two_numbers("min", &args)?;
     match Value::num_cmp(&a, &b) {
         Some(std::cmp::Ordering::Greater) => Ok(b),
@@ -198,7 +200,7 @@ fn n_min(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_max(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_max(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let (a, b) = two_numbers("max", &args)?;
     match Value::num_cmp(&a, &b) {
         Some(std::cmp::Ordering::Less) => Ok(b),
@@ -206,7 +208,7 @@ fn n_max(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_sqrt(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_sqrt(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("sqrt", &args)?;
     match v {
         Value::Int(i) => Ok(Value::Float((i as f64).sqrt())),
@@ -218,7 +220,7 @@ fn n_sqrt(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_pow(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_pow(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let (a, b) = two_numbers("pow", &args)?;
     let x = match a {
         Value::Int(i) => i as f64,
@@ -233,11 +235,11 @@ fn n_pow(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     Ok(Value::Float(x.powf(y)))
 }
 
-fn n_rand(vm: &mut Vm, _args: Vec<Value>) -> Result<Value, String> {
+fn n_rand(vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
     Ok(Value::Float(vm.next_rand()))
 }
 
-fn n_clock(_vm: &mut Vm, _args: Vec<Value>) -> Result<Value, String> {
+fn n_clock(_vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -245,7 +247,7 @@ fn n_clock(_vm: &mut Vm, _args: Vec<Value>) -> Result<Value, String> {
     Ok(Value::Float(secs))
 }
 
-fn n_push(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_push(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if args.len() != 2 {
         return Err(format!("push: expected 2 arguments (array, value), got {}", args.len()));
     }
@@ -261,7 +263,7 @@ fn n_push(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_pop(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_pop(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("pop", &args)?;
     match v {
         Value::Array(a) => match a.borrow_mut().pop() {
@@ -275,13 +277,13 @@ fn n_pop(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_keys(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_keys(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("keys", &args)?;
     match v {
         Value::Map(m) => {
-            let mut ks: Vec<String> = m.borrow().keys().cloned().collect();
+            let mut ks: Vec<Rc<str>> = m.borrow().keys().cloned().collect();
             ks.sort();
-            let items: Vec<Value> = ks.into_iter().map(Value::str).collect();
+            let items: Vec<Value> = ks.into_iter().map(Value::Str).collect();
             Ok(Value::Array(Rc::new(RefCell::new(items))))
         }
         other => Err(format!(
@@ -291,7 +293,7 @@ fn n_keys(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_has(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_has(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if args.len() != 2 {
         return Err(format!("has: expected 2 arguments (map, key), got {}", args.len()));
     }
@@ -308,7 +310,7 @@ fn n_has(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_assert(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_assert(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if args.is_empty() || args.len() > 2 {
         return Err(format!(
             "assert: expected 1 or 2 arguments, got {}",
@@ -333,7 +335,7 @@ fn n_assert(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
 
 /// Abort with a message: `panic("oops")` raises a runtime error carrying the
 /// text (catchable with `try`/`catch`, fatal otherwise).
-fn n_panic(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_panic(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if args.len() > 1 {
         return Err(format!("panic: expected 0 or 1 arguments, got {}", args.len()));
     }
@@ -363,22 +365,22 @@ fn two_strings(name: &str, args: &[Value]) -> Result<(Rc<str>, Rc<str>), String>
     }
 }
 
-fn n_upper(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_upper(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let s = one_string("upper", &args)?;
     Ok(Value::str(s.to_uppercase()))
 }
 
-fn n_lower(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_lower(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let s = one_string("lower", &args)?;
     Ok(Value::str(s.to_lowercase()))
 }
 
-fn n_trim(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_trim(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let s = one_string("trim", &args)?;
     Ok(Value::str(s.trim()))
 }
 
-fn n_split(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_split(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let (s, sep) = two_strings("split", &args)?;
     if sep.is_empty() {
         return Err("split: the separator must not be empty".to_string());
@@ -387,7 +389,7 @@ fn n_split(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     Ok(Value::Array(Rc::new(RefCell::new(parts))))
 }
 
-fn n_join(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_join(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if args.len() != 2 {
         return Err(format!("join: expected 2 arguments (array, separator), got {}", args.len()));
     }
@@ -404,7 +406,7 @@ fn n_join(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_replace(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if args.len() != 3 {
         return Err(format!("replace: expected 3 arguments (string, from, to), got {}", args.len()));
     }
@@ -422,7 +424,7 @@ fn n_replace(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     Ok(Value::str(s.replace(from.as_ref(), to.as_ref())))
 }
 
-fn n_contains(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_contains(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     match (&args.get(0), &args.get(1)) {
         (Some(Value::Array(a)), Some(v)) => {
             let found = a.borrow().iter().any(|item| item.equals(v));
@@ -440,12 +442,12 @@ fn n_contains(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_starts_with(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_starts_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let (s, prefix) = two_strings("starts_with", &args)?;
     Ok(Value::Bool(s.starts_with(prefix.as_ref())))
 }
 
-fn n_ends_with(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_ends_with(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let (s, suffix) = two_strings("ends_with", &args)?;
     Ok(Value::Bool(s.ends_with(suffix.as_ref())))
 }
@@ -467,7 +469,7 @@ fn clamp_slice_index(i: i64, len: usize, what: &str) -> Result<usize, String> {
 
 /// slice(s, a, b) / slice(arr, a, b): a substring/subarray, `b` exclusive,
 /// negative indices count from the end, out-of-range clamps (Python-style).
-fn n_slice(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_slice(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if args.len() != 3 {
         return Err(format!("slice: expected 3 arguments (value, start, end), got {}", args.len()));
     }
@@ -494,7 +496,7 @@ fn n_slice(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
 }
 
 /// find(s, sub): index of the first occurrence, or -1.
-fn n_find(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_find(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let (s, sub) = two_strings("find", &args)?;
     match s.find(sub.as_ref()) {
         Some(byte_pos) => Ok(Value::Int(s[..byte_pos].chars().count() as i64)),
@@ -502,7 +504,7 @@ fn n_find(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     }
 }
 
-fn n_repeat(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_repeat(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     if args.len() != 2 {
         return Err(format!("repeat: expected 2 arguments, got {}", args.len()));
     }
@@ -522,7 +524,7 @@ fn n_repeat(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
 }
 
 /// ord(s): the code point of the first character.
-fn n_ord(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_ord(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let s = one_string("ord", &args)?;
     match s.chars().next() {
         Some(c) => Ok(Value::Int(c as i64)),
@@ -531,7 +533,7 @@ fn n_ord(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
 }
 
 /// chr(i): the character with that code point.
-fn n_chr(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+fn n_chr(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     let v = one_arg("chr", &args)?;
     match v {
         Value::Int(i) => match u32::try_from(i).ok().and_then(char::from_u32) {
