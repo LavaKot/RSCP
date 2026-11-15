@@ -318,6 +318,12 @@ README.
 
 ## Changelog
 
+* **26.0.12.5** — floor division `a // b`: explicit Python-style flooring
+  (`-7 // 2` is `-4`), ints stay exact ints, floats floor the quotient,
+  mixing promotes, `// 0` raises `DIV_ZERO` and `i64::MIN // -1` raises
+  `INT_OVERFLOW`. `/` is now documented as Rust-style integer division and
+  `//` says what you mean. The pre-2026.5.1 `//`-comment migration hint is
+  gone with the syntax (`/* */` block comments keep theirs).
 * **26.0.12.4** — documentation trust pass: the README versioning section no
   longer contradicts itself (it said `26.0.10.0` while the release was
   `v26.0.12.3`, and is now updated with every release), the changelog's
