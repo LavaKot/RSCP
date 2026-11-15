@@ -32,7 +32,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "26.0.12.2";
+const VERSION: &str = "26.0.12.3";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -105,6 +105,23 @@ fn main() {
 fn run_cli(args: &[String]) -> i32 {
     match args.first().map(|s| s.as_str()) {
         None => {
+            // Python-style (26.0.12.3): piped stdin runs as a program —
+            // `echo 'println(1 + 1)' | rscp`. An interactive terminal
+            // still shows the usage (the REPL stays `rscp repl`).
+            if !std::io::stdin().is_terminal() {
+                let mut src = String::new();
+                if std::io::Read::read_to_string(&mut std::io::stdin(), &mut src).is_ok()
+                    && !src.trim().is_empty()
+                {
+                    let tmp = std::env::temp_dir()
+                        .join(format!("rscp-stdin-{}.rscp", std::process::id()));
+                    if std::fs::write(&tmp, &src).is_ok() {
+                        let code = file_command("run", &tmp.to_string_lossy());
+                        let _ = std::fs::remove_file(&tmp);
+                        return code;
+                    }
+                }
+            }
             eprint!("{USAGE}");
             64
         }
