@@ -6,7 +6,7 @@
 
 | Редактор | Что даёт | Куда положить |
 |---|---|---|
-| **VS Code / VSCodium / Cursor** | подсветка, сниппеты, скобки | готовый `vscode/rscp-26.0.12.11.vsix`: `code --install-extension vscode/rscp-26.0.12.11.vsix` |
+| **VS Code / VSCodium / Cursor** | подсветка, сниппеты, скобки | готовый `vscode/rscp-26.0.12.12.vsix`: `code --install-extension vscode/rscp-26.0.12.12.vsix` |
 | **Vim / Neovim** | подсветка | `vim/syntax/rscp.vim` → `~/.vim/syntax/`, `vim/ftdetect/rscp.vim` → `~/.vim/ftdetect/` |
 | **Sublime Text 3/4** | подсветка | `sublime/RSCP.tmLanguage` → `~/.config/sublime-text/Packages/RSCP/` |
 | **Notepad++** | подсветка, свёртка `{ }` | `notepad++/rscp-udl.xml` → Language → User Defined Language → Import |
@@ -17,7 +17,7 @@
 
 ## Запасные ассоциации (одна строка, без установки чего-либо)
 
-RSCP 26.0.12.11 унаследовал ключевые слова от Rust, а структуру блока — от C,
+RSCP 26.0.12.12 унаследовал ключевые слова от Rust, а структуру блока — от C,
 поэтому «чужие» подсветки смотрятся почти родными:
 
 * **VS Code / Cursor** (`settings.json`):

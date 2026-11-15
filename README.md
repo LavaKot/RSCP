@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.11 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.12 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.11.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.12.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,7 +304,7 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So the current release is `26.0.12.3` (`v26.0.12.11`); a hotfix on top of
+So the current release is `26.0.12.3` (`v26.0.12.12`); a hotfix on top of
 it would be `26.0.12.4`, and the next feature release `26.0.13.0`. While
 the second number is `0`, GitHub releases are titled **"Beta …"** (e.g.
 "Beta 26.0.12.3"); from the first stable release the prefix disappears.
@@ -318,6 +318,14 @@ README.
 
 ## Changelog
 
+* **26.0.12.12** — `rscp fmt` could emit programs that no longer run.
+  Two printer bugs: `not b` printed as `notb` (a different identifier —
+  the word operator must keep its space), and a block `{` after a
+  closing `}` went to the next line, orphaning an if-body when the
+  condition was a `match` expression (`if match c { ... } { ... }`);
+  `} {` now stays on one line like `} else`. Both found by the new
+  fmt round-trip probe (`scripts/holes2.py`, group zf), which runs fmt
+  over every golden case and executes the result.
 * **26.0.12.11** — deep nesting cannot crash the interpreter anymore.
   Five stack-exhaustion vectors found by `scripts/recon.py` all end in a
   clean error or a normal exit now: `!!!!…` unary chains and `2**2**2…`

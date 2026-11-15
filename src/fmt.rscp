@@ -153,8 +153,10 @@ impl Fmt {
             None => false,
             Some(prev) => space_rule(prev, t.ty),
         };
-        // Prefix operators (unary -, not, !, ~) hug their operand.
-        let prefix = matches!(t.ty, Minus | Plus | Not | NotWord | Tilde)
+        // Prefix operators (unary -, !, ~) hug their operand. The word
+        // `not` must not: `not b` used to print as `notb`, a different
+        // identifier (26.0.12.12).
+        let prefix = matches!(t.ty, Minus | Plus | Not | Tilde)
             && !self.last.map_or(true, ends_value);
         self.emit(t, before);
         if prefix {
@@ -210,9 +212,11 @@ impl Fmt {
                     self.indent = self.indent.saturating_sub(1);
                     self.newline();
                     self.emit(t, false);
-                    if matches!(next, Some(Else | Catch)) {
+                    if matches!(next, Some(Else | Catch | LBrace)) {
                         self.out.push(' ');
-                        self.no_space_after = true; // "} else" stays one line
+                        // "} else" / "} {" stay on one line: a split here
+                        // used to orphan an if-body brace (26.0.12.12).
+                        self.no_space_after = true;
                         return;
                     }
                     self.newline();
@@ -290,6 +294,8 @@ mod tests {
             "match n { 0 => \"zero\", 1|2 => \"few\", else => \"many\" }",
             "for (var i = 0; i < 3; i++) { write(i) }",
             "try { risky() } catch e { println(e) }",
+            "let x = not true\nprintln(not (1 == 2), not x)",
+            "if match c { \"+\" => true, else => false } { push(toks, c) }",
             "if ok { work() }\nelse if done { stop() }\nelse { wait() }",
         ];
         for src in srcs {
