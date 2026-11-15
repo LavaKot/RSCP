@@ -149,5 +149,16 @@
       "f\"${1:text} {${2:expr}} ${3:more}\""
     ],
     "description": "f-string with an interpolation"
+  },
+  "try catch": {
+    "prefix": "try",
+    "body": [
+      "try {",
+      "\t${1:risky()}",
+      "} catch ${2:e} {",
+      "\t${3:println($2)}",
+      "}"
+    ],
+    "description": "try/catch with an error binding"
   }
 }

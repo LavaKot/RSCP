@@ -86,9 +86,15 @@ pub enum Op {
     ToString,
     /// pop n (u8) strings, push their concatenation
     StrJoin,
+    /// register an error handler: jump target u16 = the catch code
+    TryCatch,
+    /// unregister the innermost handler (try body finished normally)
+    PopHandler,
+    /// raise a runtime error carrying the popped value's text (catchable)
+    Throw,
 }
 
-const ALL_OPS: [Op; 49] = [
+const ALL_OPS: [Op; 52] = [
     Op::Constant,
     Op::Null,
     Op::True,
@@ -138,6 +144,9 @@ const ALL_OPS: [Op; 49] = [
     Op::Pow,
     Op::ToString,
     Op::StrJoin,
+    Op::TryCatch,
+    Op::PopHandler,
+    Op::Throw,
 ];
 
 impl Op {
@@ -196,6 +205,9 @@ impl Op {
             Op::Pow => "Pow",
             Op::ToString => "ToString",
             Op::StrJoin => "StrJoin",
+            Op::TryCatch => "TryCatch",
+            Op::PopHandler => "PopHandler",
+            Op::Throw => "Throw",
         }
     }
 
@@ -216,6 +228,7 @@ impl Op {
             | Op::JumpIfTruePeek
             | Op::Loop
             | Op::Closure
+            | Op::TryCatch
             | Op::Array
             | Op::Map => Operand::U16,
             _ => Operand::None,
@@ -394,7 +407,7 @@ fn disasm_one(p: &FnProto, out: &mut String) {
                             const_repr(&chunk.consts[v as usize])
                         ));
                     }
-                    Op::Jump | Op::JumpIfFalsePeek | Op::JumpIfTruePeek | Op::Loop => {
+                    Op::Jump | Op::JumpIfFalsePeek | Op::JumpIfTruePeek | Op::Loop | Op::TryCatch => {
                         text.push_str(&format!("        ; -> {v}"));
                     }
                     Op::Closure => {

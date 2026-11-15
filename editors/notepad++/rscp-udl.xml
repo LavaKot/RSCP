@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!--
-  Notepad++ User Defined Language for RSCP 2026.3.1.0.
+  Notepad++ User Defined Language for RSCP 2026.4.0.0.
 
   Install: Language -> User Defined Language -> Define... -> Import...
   and select this file. After that, .rscp files opened in Notepad++
@@ -33,7 +33,7 @@
             <Keywords name="Folders in comment, open"></Keywords>
             <Keywords name="Folders in comment, middle"></Keywords>
             <Keywords name="Folders in comment, close"></Keywords>
-            <Keywords name="Keywords1">fn let var if else while loop for in match return break continue true false null</Keywords>
+            <Keywords name="Keywords1">fn let var if else while loop for in match try catch throw return break continue true false null</Keywords>
             <Keywords name="Keywords2">print println len str int float type abs min max sqrt pow rand clock push pop keys has assert panic upper lower trim split join replace contains starts_with ends_with slice find repeat ord chr</Keywords>
             <Keywords name="Keywords3"></Keywords>
             <Keywords name="Keywords4"></Keywords>

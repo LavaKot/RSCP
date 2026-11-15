@@ -105,7 +105,7 @@
       "patterns": [
         {
           "name": "keyword.control.flow.rscp",
-          "match": "\\b(if|else|while|loop|for|in|match|return|break|continue)\\b"
+          "match": "\\b(if|else|while|loop|for|in|match|try|catch|throw|return|break|continue)\\b"
         },
         {
           "name": "storage.type.rscp",

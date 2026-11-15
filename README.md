@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.3.1.0 — enter statements, Ctrl-D to exit.
+rscp 2026.4.0.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.3.1.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.4.0.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -324,6 +324,33 @@ unreachable), and if nothing matches at runtime the match raises a
 catchable `match: no arm matched the value` error. `break`/`continue`/`return`
 inside an arm body do what they'd do in the enclosing loop or function.
 
+### Errors: `try` / `catch` / `throw`
+
+Runtime errors are values you can catch: division by zero, out-of-bounds
+indexes, missing map keys, failed assertions, `panic()` — and your own
+`throw`. The `catch` binds the error's message text (or stays unnamed):
+
+```rust
+fn parse_int(s) {
+    try { return int(s) }
+    catch e { return -1 }        // "int: cannot convert 's' ..."
+}
+
+try { risky(0) } catch e { println("failed:", e) }
+try { throw "custom boom" } catch { println("caught!") }
+```
+
+Errors unwind cleanly through any number of function frames into the
+nearest enclosing `try` (with upvalues closed on the way), the catch
+binding is an ordinary local (closures can capture it), and `return`,
+`break` and `continue` all leave `try` blocks correctly. A `try` whose
+body completes normally costs one opcode — a handler push and pop.
+
+Deliberately **not** catchable: stack overflow and internal errors —
+catching those would risk an immediate second failure inside the handler.
+Compile-time errors are of course still compile-time. An uncaught error
+exits with code 70 and a stack trace, exactly as before.
+
 ### Functions and closures
 
 ```rust
@@ -413,8 +440,8 @@ by zero are runtime errors, not UB.
 | `push(arr, v)` / `pop(arr)` | array stack operations |
 | `keys(map)` | **sorted** array of keys (deterministic iteration) |
 | `has(map, key)` | key-presence test |
-| `assert(cond, msg?)` | runtime error if `cond` is false |
-| `panic(msg?)` | abort with a message (catchable, see the Changelog) |
+| `assert(cond, msg?)` | runtime error if `cond` is false (catchable) |
+| `panic(msg?)` | abort with a message (catchable with `try`) |
 | `upper` `lower` `trim` | case and whitespace (`upper("héllo")` is `HÉLLO`) |
 | `split(s, sep)` / `join(arr, sep)` | string ↔ array |
 | `replace(s, from, to)` | replace all occurrences |
@@ -473,8 +500,8 @@ runtime without building temporary arrays.
 program        := statement* EOF ;
 
 statement      := letStmt | fnStmt | ifStmt | whileStmt | loopStmt | forStmt
-                | returnStmt | breakStmt | continueStmt | block
-                | assignment | incDec | exprStmt | ";" ;
+                | tryStmt | throwStmt | returnStmt | breakStmt | continueStmt
+                | block | assignment | incDec | exprStmt | ";" ;
 
 letStmt        := ("let" | "var") IDENT "=" expression [";"] ;
 fnStmt         := "fn" IDENT funcBody ;
@@ -494,6 +521,8 @@ forStep        := assignment' | incDec' | exprStmt' ;
 returnStmt     := "return" [ expression ] [";"] ;
 breakStmt      := "break" [";"] ;
 continueStmt   := "continue" [";"] ;
+tryStmt        := "try" block "catch" [ IDENT ] block ;
+throwStmt      := "throw" expression [";"] ;
 block          := "{" ( statement | ";" )* "}" ;
 
 assignment     := target ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expression [";"] ;
@@ -637,14 +666,14 @@ Design highlights:
 cargo test
 ```
 
-* **54 unit tests** across lexer (including the semicolon-insertion rules),
+* **57 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **86 golden cases** in `tests/cases/`: each program's exact stdout is
+* **89 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
-* **8 showcase examples** are smoke-tested (`examples/`).
+* **9 showcase examples** are smoke-tested (`examples/`).
 * The CLI surface itself is tested (exit codes, subcommands).
 
 ---
@@ -685,13 +714,22 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.3.1` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.3.1.0`), release
+(`2026.4.0` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.4.0.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.4.0.0** — error handling: `try` / `catch` / `throw`. Runtime errors
+  (division by zero, bad indexes, missing keys, failed asserts, `panic()`)
+  are catchable values: `try { risky() } catch e { … }` binds the message,
+  `catch { … }` stays unnamed, and `throw expr` raises your own. Errors
+  unwind through any number of call frames (closing upvalues on the way),
+  `return`/`break`/`continue` leave `try` blocks correctly, and stack
+  overflow stays deliberately fatal. New opcodes `TryCatch`/`PopHandler`/
+  `Throw` with a handler stack in the VM. 57 unit tests, 89 golden cases,
+  new `examples/errors.rscp`.
 * **2026.3.1.0** — strings, interpolation and `**`. f-strings
   (`f"n={n}, sq={n ** 2}"`) embed any expression, support `{{`/`}}` escapes
   and nest; the holes are parsed at compile time with exact positions. The

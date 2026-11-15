@@ -39,6 +39,9 @@ struct FnCtx {
     locals: Vec<Local>,
     scope_depth: usize,
     is_script: bool,
+    /// How many `try` blocks are open in this function right now; `return`
+    /// and loop exits must unregister their handlers.
+    try_depth: usize,
     /// Temporary stack cells above the locals region right now. Every
     /// expression leaves its result counted here; opcodes that consume
     /// operands decrement it. `declare_local` uses it to place a new
@@ -57,6 +60,9 @@ struct LoopCtx {
     /// has the enclosing expression's temps below it); `break` pops those
     /// pushed since, on top of the loop's locals.
     pending_at_entry: usize,
+    /// `try` blocks open when the loop started; `break`/`continue` must
+    /// unregister the handlers opened since then.
+    try_depth_at_entry: usize,
     /// Locals after the loop's own scope was set up (e.g. after the `for`
     /// initializer); `continue` unwinds to here but keeps these alive.
     cont_locals: usize,
@@ -84,6 +90,7 @@ pub fn compile(program: &[Stmt]) -> Result<Rc<FnProto>, RscpError> {
             }],
             scope_depth: 0,
             is_script: true,
+            try_depth: 0,
             pending: 0,
         }],
         loops: Vec::new(),
@@ -412,6 +419,7 @@ impl Compiler {
                     fn_depth: self.fns.len(),
                     locals_at_entry,
                     pending_at_entry: self.fns.last().unwrap().pending,
+                    try_depth_at_entry: self.fns.last().unwrap().try_depth,
                     cont_locals: locals_at_entry,
                     breaks: Vec::new(),
                     conts: Vec::new(),
@@ -450,6 +458,7 @@ impl Compiler {
                     fn_depth: self.fns.len(),
                     locals_at_entry,
                     pending_at_entry: self.fns.last().unwrap().pending,
+                    try_depth_at_entry: self.fns.last().unwrap().try_depth,
                     cont_locals: self.cur_locals(),
                     breaks: Vec::new(),
                     conts: Vec::new(),
@@ -504,6 +513,7 @@ impl Compiler {
                         fn_depth: self.fns.len(),
                         locals_at_entry,
                         pending_at_entry: self.fns.last().unwrap().pending,
+                    try_depth_at_entry: self.fns.last().unwrap().try_depth,
                         cont_locals: self.cur_locals(),
                         breaks: Vec::new(),
                         conts: Vec::new(),
@@ -560,6 +570,7 @@ impl Compiler {
                     fn_depth: self.fns.len(),
                     locals_at_entry,
                     pending_at_entry: self.fns.last().unwrap().pending,
+                    try_depth_at_entry: self.fns.last().unwrap().try_depth,
                     cont_locals: self.cur_locals(),
                     breaks: Vec::new(),
                     conts: Vec::new(),
@@ -593,16 +604,54 @@ impl Compiler {
                     self.patch_jump(b, s.line, s.col)?;
                 }
             }
+            StmtKind::Try { body, name, handler } => {
+                // Register a handler, run the body, unregister on success.
+                // On error the VM unwinds to `catch_addr` with the message
+                // on the stack (modeled here as one pending temp).
+                let try_site = self.emit_u16(Op::TryCatch, 0, s.line, s.col);
+                self.cur().try_depth += 1;
+                self.stmt(body)?;
+                self.cur().try_depth -= 1;
+                self.emit(Op::PopHandler, s.line, s.col);
+                let jend = self.emit_jump(Op::Jump, s.line, s.col)?;
+                self.patch_jump(try_site, s.line, s.col)?;
+                // The unwinder pushed the error message.
+                self.push_temp();
+                self.begin_scope();
+                match name {
+                    Some(n) => {
+                        self.declare_local(n, false, s.line, s.col)?;
+                    }
+                    None => {
+                        self.emit(Op::Pop, s.line, s.col);
+                        self.drop_temps(1);
+                    }
+                }
+                self.stmt(handler)?;
+                self.end_scope(s.line, s.col);
+                self.patch_jump(jend, s.line, s.col)?;
+            }
+            StmtKind::Throw(value) => {
+                self.expr(value)?;
+                self.emit(Op::Throw, s.line, s.col);
+                self.drop_temps(1);
+            }
             StmtKind::Return(value) => {
                 if self.fns.len() == 1 {
                     return Err(self.err("'return' outside of a function", s.line, s.col));
                 }
+                // The value is computed while the try handlers are still
+                // active (an error in it is catchable), then the handlers
+                // are unregistered before leaving.
                 match value {
                     Some(e) => self.expr(e)?,
                     None => {
                         self.emit(Op::Null, s.line, s.col);
                         self.push_temp();
                     }
+                }
+                for _ in 0..self.cur().try_depth {
+                    self.emit(Op::PopHandler, s.line, s.col);
                 }
                 self.emit(Op::Return, s.line, s.col);
                 self.drop_temps(1);
@@ -611,13 +660,18 @@ impl Compiler {
                 if !self.loop_available() {
                     return Err(self.err("'break' outside of a loop", s.line, s.col));
                 }
-                let (n, temps) = {
+                let (n, temps, handlers) = {
                     let ctx = self.loops.last().unwrap();
                     (
                         self.cur_locals() - ctx.locals_at_entry,
                         self.fns.last().unwrap().pending.saturating_sub(ctx.pending_at_entry),
+                        self.fns.last().unwrap().try_depth.saturating_sub(ctx.try_depth_at_entry),
                     )
                 };
+                // Leave any try blocks opened inside the loop first.
+                for _ in 0..handlers {
+                    self.emit(Op::PopHandler, s.line, s.col);
+                }
                 // Locals sit above any temps pushed since the loop opened,
                 // so pop them first, then the temps.
                 if n > 0 {
@@ -633,14 +687,18 @@ impl Compiler {
                 if !self.loop_available() {
                     return Err(self.err("'continue' outside of a loop", s.line, s.col));
                 }
-                let (target, n, temps) = {
+                let (target, n, temps, handlers) = {
                     let ctx = self.loops.last().unwrap();
                     (
                         ctx.cont_target,
                         self.cur_locals() - ctx.cont_locals,
                         self.fns.last().unwrap().pending.saturating_sub(ctx.pending_at_entry),
+                        self.fns.last().unwrap().try_depth.saturating_sub(ctx.try_depth_at_entry),
                     )
                 };
+                for _ in 0..handlers {
+                    self.emit(Op::PopHandler, s.line, s.col);
+                }
                 if n > 0 {
                     self.emit_u8(Op::PopN, n.min(u8::MAX as usize) as u8, s.line, s.col);
                 }
@@ -1225,6 +1283,7 @@ impl Compiler {
             }],
             scope_depth: 1,
             is_script: false,
+            try_depth: 0,
             pending: 0,
         };
         for (i, p) in lit.params.iter().enumerate() {

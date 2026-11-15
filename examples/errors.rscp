@@ -1,0 +1,50 @@
+// Error handling: try/catch/throw, safe wrappers, retries.
+
+// Wrap a fallible conversion.
+fn parse_int(s) {
+    try { return int(s) }
+    catch e { return -1 }
+}
+println(parse_int("42"), parse_int("not a number"))
+
+// A safe division.
+fn div(a, b) {
+    try { return a / b }
+    catch e { return null }
+}
+println(div(10, 2), div(1, 0))
+
+// Retry loop: attempt something three times.
+fn flaky(n) {
+    if n < 2 { throw f"attempt {n} failed" }
+    return "ok"
+}
+var result = "gave up"
+for attempt in 1..=3 {
+    try {
+        result = flaky(attempt)
+        break
+    } catch e {
+        println(f"retry after: {e}")
+    }
+}
+println("result:", result)
+
+// Errors carry only a message; check it with the string tools.
+try {
+    let arr = [1, 2, 3]
+    println(arr[99])
+} catch e {
+    println(starts_with(e, "index"), "|", e)
+}
+
+// Collect the outcome of many operations without crashing.
+var failures = 0
+for op in ["ok", "fail", "ok", "fail"] {
+    try {
+        if op == "fail" { throw "nope" }
+    } catch e {
+        failures++
+    }
+}
+println(f"{failures} of 4 operations failed")

@@ -211,6 +211,15 @@ pub enum StmtKind {
     },
     /// Named function declaration: `fn name(p1, p2) { ... }`.
     Fn { name: String, func: FuncLit },
+    /// `try { body } catch e { handler }` — runtime errors in `body` jump to
+    /// `handler` with the message bound to `name` (or unnamed).
+    Try {
+        body: Box<Stmt>,
+        name: Option<String>,
+        handler: Box<Stmt>,
+    },
+    /// `throw expr` — raise a runtime error carrying the value's text.
+    Throw(Expr),
     Return(Option<Expr>),
     Break,
     Continue,

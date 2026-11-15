@@ -30,7 +30,7 @@ use parser::Parser;
 use std::rc::Rc;
 use vm::Vm;
 
-const VERSION: &str = "2026.3.1.0";
+const VERSION: &str = "2026.4.0.0";
 
 const USAGE: &str = "\
 rscp — the RSCP programming language (light like Python, shaped like Rust)
@@ -60,6 +60,8 @@ LANGUAGE (light syntax):
     let flags = 0b1010 | 0xF0 // bitwise & | ^ ~ << >>, 0x/0b/0o literals
     let area = 2 ** 10        // power: exact int, right-associative
     let msg = f\"n={n}, sq={n ** 2}\"   // f-string interpolation
+    try { risky() } catch e { println(e) }   // catch runtime errors
+    throw \"boom\"                      // ...and raise your own
 
 BUILT-INS:
     print println len str int float type abs min max sqrt pow rand clock

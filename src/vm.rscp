@@ -24,6 +24,18 @@ pub struct GlobalCell {
     pub mutable: bool,
 }
 
+/// An active `try` handler: unwinding restores the frame count and stack
+/// length recorded at registration, then enters `catch_ip` with the error
+/// message pushed onto the stack.
+#[derive(Debug, Clone, Copy)]
+pub struct Handler {
+    /// `frames.len()` when the handler was registered; valid while the
+    /// registering frame (index `frame_count - 1`) is still alive.
+    pub frame_count: usize,
+    pub catch_ip: usize,
+    pub stack_len: usize,
+}
+
 struct Frame {
     func: Rc<FunctionVal>,
     /// Resume point (instruction index) saved while a callee runs.
@@ -37,6 +49,8 @@ pub struct Vm {
     frames: Vec<Frame>,
     pub globals: HashMap<String, GlobalCell>,
     open_upvalues: Vec<(usize, Rc<RefCell<Upvalue>>)>,
+    /// Active `try` handlers, innermost last.
+    pub handlers: Vec<Handler>,
     /// REPL mode: allow redefining and reassigning top-level bindings.
     pub repl: bool,
     /// When true, `print`/`println` produce no output (used by tests).
@@ -62,6 +76,7 @@ impl Vm {
             frames: Vec::with_capacity(64),
             globals: HashMap::new(),
             open_upvalues: Vec::new(),
+            handlers: Vec::new(),
             repl: false,
             quiet: false,
             rng: seed,
@@ -110,6 +125,7 @@ impl Vm {
     fn run_frameless(&mut self, proto: Rc<FnProto>) -> Result<(), RscpError> {
         self.stack.clear();
         self.frames.clear();
+        self.handlers.clear();
         let func = Rc::new(FunctionVal { proto, upvalues: Vec::new() });
         self.stack.push(Value::Func(Rc::clone(&func)));
         self.frames.push(Frame { func, ip: 0, base: 0 });
@@ -120,14 +136,31 @@ impl Vm {
     /// switch (call or return); the inner loop borrows the current chunk
     /// through a local `Rc` clone, so pushing frames never fights the borrow.
     fn exec(&mut self) -> Result<(), RscpError> {
-        // Expands to: sync the current frame's ip, then return a runtime
-        // error with a full stack trace. `self` resolves at the expansion
-        // site; the failing instruction index must be passed in because
-        // macro hygiene hides surrounding locals.
+        // Expands to: sync the current frame's ip, then raise a runtime
+        // error. Catchable errors unwind to the innermost `try` handler
+        // (if any) and resume in its catch block; fatal ones propagate.
+        // On the catch path the macro `break`s out of the inner dispatch
+        // loop, which makes the outer loop reload the frame (and its new
+        // ip) — macro hygiene hides `'outer`, so a labeled continue is not
+        // an option. `self` resolves at the expansion site; the failing
+        // instruction index must be passed in because macro hygiene hides
+        // surrounding locals.
         macro_rules! rt {
             ($op_ip:expr, $msg:expr) => {{
                 self.frames.last_mut().unwrap().ip = $op_ip;
-                return Err(rt_error(self, $msg));
+                match self.raise($msg, true) {
+                    Ok(()) => break, // a handler took over
+                    Err(e) => return Err(e),
+                }
+            }};
+        }
+        macro_rules! rt_fatal {
+            ($op_ip:expr, $msg:expr) => {{
+                self.frames.last_mut().unwrap().ip = $op_ip;
+                match self.raise($msg, false) {
+                    Ok(()) => break, // unreachable for fatal errors
+                    Err(e) => return Err(e),
+                }
             }};
         }
 
@@ -144,7 +177,7 @@ impl Vm {
                 ip += 1;
                 let op = match Op::from_byte(byte) {
                     Some(op) => op,
-                    None => rt!(op_ip, format!("corrupt bytecode: unknown opcode {byte}")),
+                    None => rt_fatal!(op_ip, format!("corrupt bytecode: unknown opcode {byte}")),
                 };
                 match op {
                     Op::Constant => {
@@ -157,7 +190,7 @@ impl Vm {
                     Op::False => self.stack.push(Value::Bool(false)),
                     Op::Pop => {
                         if self.stack.len() <= base {
-                            rt!(op_ip, "internal error: stack underflow in Pop");
+                            rt_fatal!(op_ip, "internal error: stack underflow in Pop");
                         }
                         let new_len = self.stack.len() - 1;
                         self.close_upvalues_ge(new_len);
@@ -167,7 +200,7 @@ impl Vm {
                         let n = chunk.code[ip] as usize;
                         ip += 1;
                         if self.stack.len() < base + n {
-                            rt!(op_ip, "internal error: stack underflow in PopN");
+                            rt_fatal!(op_ip, "internal error: stack underflow in PopN");
                         }
                         let new_len = self.stack.len() - n;
                         self.close_upvalues_ge(new_len);
@@ -204,7 +237,7 @@ impl Vm {
                         let v = self.stack.pop().unwrap();
                         let name = match &chunk.consts[ci as usize] {
                             Value::Str(s) => s.to_string(),
-                            _ => rt!(op_ip, "internal error: global name constant is not a string"),
+                            _ => rt_fatal!(op_ip, "internal error: global name constant is not a string"),
                         };
                         self.globals.insert(
                             name,
@@ -215,7 +248,7 @@ impl Vm {
                         let ci = read_u16(chunk, &mut ip);
                         let name = match &chunk.consts[ci as usize] {
                             Value::Str(s) => s.to_string(),
-                            _ => rt!(op_ip, "internal error: global name constant is not a string"),
+                            _ => rt_fatal!(op_ip, "internal error: global name constant is not a string"),
                         };
                         match self.globals.get(&name) {
                             Some(cell) => {
@@ -230,7 +263,7 @@ impl Vm {
                         let v = self.stack.pop().unwrap();
                         let name = match &chunk.consts[ci as usize] {
                             Value::Str(s) => s.to_string(),
-                            _ => rt!(op_ip, "internal error: global name constant is not a string"),
+                            _ => rt_fatal!(op_ip, "internal error: global name constant is not a string"),
                         };
                         match self.globals.get_mut(&name) {
                             None => rt!(op_ip, format!("undefined variable '{name}'")),
@@ -335,7 +368,7 @@ impl Vm {
                         let argc = chunk.code[ip] as usize;
                         ip += 1;
                         if self.stack.len() < argc + 1 {
-                            rt!(op_ip, "internal error: stack underflow in Call");
+                            rt_fatal!(op_ip, "internal error: stack underflow in Call");
                         }
                         let callee_pos = self.stack.len() - argc - 1;
                         let callee = self.stack[callee_pos].clone();
@@ -363,7 +396,10 @@ impl Vm {
                                     ));
                                 }
                                 if self.frames.len() >= MAX_FRAMES {
-                                    rt!(op_ip, format!(
+                                    // Fatal on purpose: catching a stack
+                                    // overflow and continuing would risk
+                                    // overflowing again inside the handler.
+                                    rt_fatal!(op_ip, format!(
                                         "stack overflow: call depth exceeded {MAX_FRAMES} frames"
                                     ));
                                 }
@@ -381,7 +417,7 @@ impl Vm {
                         let ci = read_u16(chunk, &mut ip);
                         let proto = match &chunk.consts[ci as usize] {
                             Value::Proto(p) => Rc::clone(p),
-                            _ => rt!(op_ip, "internal error: Closure constant is not a prototype"),
+                            _ => rt_fatal!(op_ip, "internal error: Closure constant is not a prototype"),
                         };
                         let mut upvalues = Vec::with_capacity(proto.upvalues.len());
                         // One (is_local, index) descriptor pair per captured
@@ -405,6 +441,14 @@ impl Vm {
                         self.close_upvalues_ge(frame_base);
                         self.stack.truncate(frame_base);
                         self.frames.pop();
+                        // Handlers registered by the returning frame die with it.
+                        while self
+                            .handlers
+                            .last()
+                            .map_or(false, |h| h.frame_count > self.frames.len())
+                        {
+                            self.handlers.pop();
+                        }
                         if self.frames.is_empty() {
                             return Ok(());
                         }
@@ -495,7 +539,7 @@ impl Vm {
                         let n = chunk.code[ip] as usize;
                         ip += 1;
                         if self.stack.len() < base + n + 1 {
-                            rt!(op_ip, "internal error: stack underflow in PopNUnder");
+                            rt_fatal!(op_ip, "internal error: stack underflow in PopNUnder");
                         }
                         let top = self.stack.pop().unwrap();
                         let new_len = self.stack.len() - n;
@@ -530,6 +574,23 @@ impl Vm {
                             Err(msg) => rt!(op_ip, msg),
                         }
                     }
+                    Op::TryCatch => {
+                        let catch_ip = read_u16(chunk, &mut ip) as usize;
+                        self.handlers.push(Handler {
+                            frame_count: self.frames.len(),
+                            catch_ip,
+                            stack_len: self.stack.len(),
+                        });
+                    }
+                    Op::PopHandler => {
+                        if self.handlers.pop().is_none() {
+                            rt_fatal!(op_ip, "internal error: PopHandler with no active handler");
+                        }
+                    }
+                    Op::Throw => {
+                        let v = self.stack.pop().unwrap();
+                        rt!(op_ip, v.display_string(0));
+                    }
                     Op::ToString => {
                         let v = self.stack.pop().unwrap();
                         self.stack.push(Value::str(v.display_string(0)));
@@ -538,7 +599,7 @@ impl Vm {
                         let n = chunk.code[ip] as usize;
                         ip += 1;
                         if self.stack.len() < base + n {
-                            rt!(op_ip, "internal error: stack underflow in StrJoin");
+                            rt_fatal!(op_ip, "internal error: stack underflow in StrJoin");
                         }
                         let mut parts = Vec::with_capacity(n);
                         for _ in 0..n {
@@ -558,6 +619,31 @@ impl Vm {
                 }
             }
         }
+    }
+
+    // ---- error handling -----------------------------------------------------
+
+    /// Raise a runtime error. With `catchable` and an active `try` handler,
+    /// unwind the frames and stack to the handler's registration point and
+    /// resume in its catch block with the message on the stack; otherwise
+    /// return the error (with a full stack trace) to the caller.
+    fn raise(&mut self, msg: impl Into<String>, catchable: bool) -> Result<(), RscpError> {
+        let msg = msg.into();
+        let handler = if catchable { self.handlers.last().copied() } else { None };
+        let Some(h) = handler else {
+            return Err(rt_error(self, msg));
+        };
+        while self.frames.len() > h.frame_count {
+            self.frames.pop();
+        }
+        self.close_upvalues_ge(h.stack_len);
+        self.stack.truncate(h.stack_len);
+        if let Some(f) = self.frames.last_mut() {
+            f.ip = h.catch_ip;
+        }
+        self.handlers.pop();
+        self.stack.push(Value::str(msg));
+        Ok(())
     }
 
     // ---- upvalues ----------------------------------------------------------
@@ -1137,6 +1223,63 @@ mod tests {
         assert!(matches!(global(&vm, "m"), Value::Str(ref s) if &**s == "abab"));
         assert!(matches!(global(&vm, "o"), Value::Int(65)));
         assert!(matches!(global(&vm, "p"), Value::Str(ref s) if &**s == "B"));
+    }
+
+    #[test]
+    fn try_catch_throw() {
+        let vm = run(
+            "var log = \"\";\
+             try { let x = 1 / 0 } catch e { log = e }\
+             try { throw \"boom\" } catch e { log = log + \"|\" + e }\
+             try { panic(\"p\") } catch e { log = log + \"|\" + e }\
+             try { [1][5] } catch e { log = log + \"|\" + slice(e, 0, 5) }\
+             try { println(\"no\") } catch { log = log + \"|unreached\" }",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "log"), Value::Str(ref s)
+            if &**s == "division by zero|boom|p|index"));
+
+        // Errors cross function frames into the caller's try; `return`
+        // inside try (both paths) and break/continue inside try work.
+        let vm = run(
+            "fn risky(n) { if n == 0 { throw \"zero\" } return 100 / n }\
+             fn safe() { try { return risky(0) } catch e { return \"caught \" + e } }\
+             fn early(n) { try { if n > 0 { return \"early\" } throw \"nope\" } catch e { return \"late \" + e } }\
+             var a = safe(); var b = early(1); var c = early(0);\
+             var log = [];\
+             for i in 0..5 { try { if i == 2 { continue } if i == 4 { break } push(log, i) } catch e { push(log, \"x\") } }",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "a"), Value::Str(ref s) if &**s == "caught zero"));
+        assert!(matches!(global(&vm, "b"), Value::Str(ref s) if &**s == "early"));
+        assert!(matches!(global(&vm, "c"), Value::Str(ref s) if &**s == "late nope"));
+        match global(&vm, "log") {
+            Value::Array(arr) => {
+                let items = arr.borrow();
+                assert_eq!(items.len(), 3);
+                assert!(matches!(&items[0], Value::Int(0)));
+            }
+            other => panic!("bad log: {other:?}"),
+        }
+
+        // Nested try with a rethrow; the catch binding is a normal local.
+        let vm = run(
+            "var out = \"\";\
+             try { try { throw \"inner\" } catch e { throw \"outer: \" + e } } catch e2 { out = e2 }",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "out"), Value::Str(ref s) if &**s == "outer: inner"));
+    }
+
+    #[test]
+    fn fatal_errors_are_not_caught() {
+        // Stack overflow must stay fatal: catching it invites an immediate
+        // second overflow inside the handler.
+        let err = match run("fn f() { return f() } try { f() } catch e { }") {
+            Err(e) => e,
+            Ok(_) => panic!("expected a fatal stack overflow"),
+        };
+        assert!(format!("{err}").contains("stack overflow"));
     }
 
     #[test]

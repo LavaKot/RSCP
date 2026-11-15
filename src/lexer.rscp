@@ -30,7 +30,7 @@ fn continues_expression(ty: TokenType) -> bool {
     matches!(
         ty,
         RBrace | RBracket | RParen | Comma | Colon | Semicolon | Question | DotDot | DotDotEq
-            | Arrow | FatArrow | Else
+            | Arrow | FatArrow | Else | Catch
     )
 }
 
