@@ -51,13 +51,14 @@ rscp repl                          # interactive session
 rscp disasm examples/hello.rscp    # inspect the bytecode
 rscp tokens file.rscp              # inspect the token stream
 rscp ast file.rscp                 # inspect the parse tree
+rscp update                        # self-update from GitHub (Windows)
 ```
 
 ### REPL
 
 ```
 $ rscp repl
-rscp 2026.2.0.0 — enter statements, Ctrl-D to exit.
+rscp 2026.2.1.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -89,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.2.0.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.2.1.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -99,6 +100,18 @@ Editor support ships in [`editors/`](editors/README.md), for every editor:
   extension (double-click to run, "Open with" to edit).
 * **Anything else** — one-line fallback associations map `.rscp` to Rust
   highlighting; `.rscp` is plain text, so every editor on earth can open it.
+
+Staying up to date: `rscp update` (since 2026.2.1.0) downloads the latest
+release from GitHub and swaps the files in place — nothing to delete or
+re-download by hand, and the VS Code extension is refreshed automatically
+when a `code` / `codium` / `cursor` CLI is found. The repository is
+private, so the first run needs a GitHub token (Classic PAT with the
+`repo` scope) saved once:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.rscp" | Out-Null
+"ghp_YOUR_TOKEN" | Set-Content "$env:USERPROFILE\.rscp\token"
+```
 
 Building `rscp.exe` on Windows (three commands, no Visual Studio needed):
 
@@ -559,20 +572,27 @@ RSCP versions are four numbers: `YEAR.MAJOR.MINOR.PATCH`.
 | 3rd | minor additions — a new builtin, snippets, docs polish | `0` |
 | 4th | bug fixes and patches | `0` |
 
-So the light-syntax release is `2026.2.0.0`: second major update of 2026,
-no minor additions on top yet, no bug fixes yet. The next releases would be
-`2026.2.0.1` (a bug fix), `2026.2.1.0` (a small addition) or `2027.1.0.0`
-(next year's first major update).
+So the light-syntax release is `2026.2.0.0`: the second major update of
+2026. The release that added `rscp update` is `2026.2.1.0` — a small,
+non-breaking addition on top, still no bug fixes. A hotfix bumps only the
+last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.2.0`). The full four-number version lives in `rscp version`, the
-REPL banner, release tags (`v2026.2.0.0`), release file names and this
-README. Every release is published on GitHub as a tag with the source zip,
-the Windows zip and the `.vsix` attached.
+(`2026.2.1` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.2.1.0`), release
+file names and this README. Every release is published on GitHub as a tag
+with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.2.1.0** — `rscp update`: self-update from GitHub releases. It
+  downloads the latest Windows build, swaps `rscp.exe` in place (the
+  running copy is renamed, then replaced; the leftover is cleaned on the
+  next run) and refreshes the VS Code extension when a `code` / `codium` /
+  `cursor` CLI is present. The repo is private, so the token is read from
+  `%USERPROFILE%\.rscp\token` or `RSCP_GITHUB_TOKEN`. The golden suite no
+  longer hardcodes the version string.
 * **2026.2.0.0** — the light syntax: optional semicolons (Go-style
   insertion), `if`/`while` without parentheses, `for x in iter` with a
   fresh binding, ranges `a..b` / `a..=b`, `loop { }`, short closures
