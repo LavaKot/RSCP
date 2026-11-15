@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.3 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.4 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.3.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.4.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,10 +304,11 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So this release is `26.0.10.0` (`v26.0.12.3`); a hotfix on top of it would
-be `26.0.10.1`, and the next feature release `26.0.11.0`. While the second
-number is `0`, GitHub releases are titled **"Beta …"** (e.g. "Beta
-26.0.10.0"); from the first stable release the prefix disappears.
+So the current release is `26.0.12.3` (`v26.0.12.4`); a hotfix on top of
+it would be `26.0.12.4`, and the next feature release `26.0.13.0`. While
+the second number is `0`, GitHub releases are titled **"Beta …"** (e.g.
+"Beta 26.0.12.3"); from the first stable release the prefix disappears.
+This paragraph is updated with every release.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
@@ -317,10 +318,18 @@ README.
 
 ## Changelog
 
+* **26.0.12.4** — documentation trust pass: the README versioning section no
+  longer contradicts itself (it said `26.0.10.0` while the release was
+  `v26.0.12.3`, and is now updated with every release), the changelog's
+  duplicated entry lines are deduplicated (a release-script bug), the
+  grammar in the docs now covers `class`, `enum` declarations, `super`
+  calls, `instanceof` and literal payload elements in variant patterns,
+  and the tutorial gained an "Operator traps" section (`^` is XOR, not
+  power; `int / int` is integer division like in Rust).
+* **26.0.12.3** — piped stdin runs as a program: `echo 'println(1 + 1)' | rscp`
 * **26.0.12.3** — piped stdin runs as a program: `echo 'println(1 + 1)' | rscp`
   works like with Python (bare `rscp` on a terminal still shows the usage;
   the REPL stays `rscp repl`). Found by `scripts/holes.py`.
-* **26.0.12.2** — modules are isolated. A function defined in an imported
 * **26.0.12.2** — modules are isolated. A function defined in an imported
   module resolves names against its own module's globals (a live snapshot
   shared with every closure the module created), never against the
@@ -328,12 +337,10 @@ README.
   from module functions stay inside the module. Builtins remain visible;
   the documented globals-leak hole is closed (found by `scripts/holes.py`).
 * **26.0.12.1** — local mutual recursion works. Sibling `fn` statements in
-* **26.0.12.1** — local mutual recursion works. Sibling `fn` statements in
   a function body or block pre-declare their cells, so `fn ping` can call a
   `fn pong` declared after it — the call resolves as an upvalue, not as an
   undefined global (found by `scripts/holes.py`, RSCP's new systematic
   probe suite).
-* **26.0.12.0** — get(), literal payload patterns, and the calculator
 * **26.0.12.0** — get(), literal payload patterns, and the calculator
   example. `get(m, k, default?)` is the Option-style read: the value or the
   default (null) when the key is missing — maps, arrays and strings,
