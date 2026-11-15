@@ -866,6 +866,37 @@ impl Compiler {
             ExprKind::Match { value, arms } => {
                 self.compile_match(value, arms, e.line, e.col)?;
             }
+            ExprKind::FStr(parts) => {
+                // A literal-only f-string collapses to a plain constant.
+                if parts.len() == 1 {
+                    if let FStrPart::Lit(s) = &parts[0] {
+                        let ci = self.string_const(s, e.line, e.col)?;
+                        self.emit_u16(Op::Constant, ci, e.line, e.col);
+                        self.push_temp();
+                        return Ok(());
+                    }
+                }
+                if parts.len() > u8::MAX as usize {
+                    return Err(self.err("f-string has too many parts (max is 255)", e.line, e.col));
+                }
+                for p in parts {
+                    match p {
+                        FStrPart::Lit(s) => {
+                            let ci = self.string_const(&s, e.line, e.col)?;
+                            self.emit_u16(Op::Constant, ci, e.line, e.col);
+                            self.push_temp();
+                        }
+                        FStrPart::Expr(inner) => {
+                            self.expr(&inner)?;
+                            // ToString replaces the value in place.
+                            self.emit(Op::ToString, e.line, e.col);
+                        }
+                    }
+                }
+                self.emit_u8(Op::StrJoin, parts.len() as u8, e.line, e.col);
+                self.drop_temps(parts.len());
+                self.push_temp();
+            }
             ExprKind::Call { callee, args } => {
                 if args.len() > u8::MAX as usize {
                     return Err(self.err(format!("too many arguments in a call (max is {})", u8::MAX), e.line, e.col));
@@ -930,6 +961,7 @@ impl Compiler {
             BinaryOp::Mul => Op::Mul,
             BinaryOp::Div => Op::Div,
             BinaryOp::Mod => Op::Mod,
+            BinaryOp::Pow => Op::Pow,
             BinaryOp::BitAnd => Op::BitAnd,
             BinaryOp::BitOr => Op::BitOr,
             BinaryOp::BitXor => Op::BitXor,

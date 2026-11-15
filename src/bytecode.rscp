@@ -80,9 +80,15 @@ pub enum Op {
     BitNot,
     /// pop n (u8) cells from under the top value (used by match)
     PopNUnder,
+    /// exponentiation: int**int (exact when the exponent >= 0), else float
+    Pow,
+    /// pop a value, push its display string (f-string interpolation)
+    ToString,
+    /// pop n (u8) strings, push their concatenation
+    StrJoin,
 }
 
-const ALL_OPS: [Op; 46] = [
+const ALL_OPS: [Op; 49] = [
     Op::Constant,
     Op::Null,
     Op::True,
@@ -129,6 +135,9 @@ const ALL_OPS: [Op; 46] = [
     Op::Shr,
     Op::BitNot,
     Op::PopNUnder,
+    Op::Pow,
+    Op::ToString,
+    Op::StrJoin,
 ];
 
 impl Op {
@@ -184,13 +193,17 @@ impl Op {
             Op::Shr => "Shr",
             Op::BitNot => "BitNot",
             Op::PopNUnder => "PopNUnder",
+            Op::Pow => "Pow",
+            Op::ToString => "ToString",
+            Op::StrJoin => "StrJoin",
         }
     }
 
     /// The kind (and size) of this opcode's inline operands.
     pub fn operand(self) -> Operand {
         match self {
-            Op::PopN | Op::PopNUnder | Op::GetLocal | Op::SetLocal | Op::GetUpvalue | Op::SetUpvalue | Op::Call => {
+            Op::PopN | Op::PopNUnder | Op::StrJoin | Op::GetLocal | Op::SetLocal
+            | Op::GetUpvalue | Op::SetUpvalue | Op::Call => {
                 Operand::U8
             }
             Op::Constant

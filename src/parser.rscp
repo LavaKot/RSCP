@@ -6,6 +6,7 @@
 
 use crate::ast::*;
 use crate::errors::RscpError;
+use crate::lexer::Lexer;
 use crate::token::{Lit, Token, TokenType};
 
 /// Maximum nesting depth of statements/expressions, to protect the Rust
@@ -16,6 +17,47 @@ const MAX_PARAMS: usize = 255;
 const MAX_ARGS: usize = 255;
 
 type PResult<T> = Result<T, RscpError>;
+
+/// Re-lex and parse one f-string interpolation. The fragment lives on a
+/// single source line, so every token's position shifts by the hole's
+/// (line, col); errors are remapped the same way.
+fn parse_interp(src: &str, line: usize, col: usize) -> PResult<Expr> {
+    let remap = |e: RscpError| -> RscpError {
+        let shift = |c: usize| col + c.saturating_sub(1);
+        match e {
+            RscpError::Lex { msg, col: c, .. } => RscpError::lex(msg, line, shift(c)),
+            // The f-string literal itself is closed, so "need more input"
+            // would be wrong — report it as a plain error.
+            RscpError::Parse { msg, col: c, .. } => {
+                RscpError::parse(msg, line, shift(c), false)
+            }
+            other => other,
+        }
+    };
+    let mut tokens = Lexer::new(src).tokenize().map_err(remap)?;
+    for t in &mut tokens {
+        t.line = line;
+        t.col = col + t.col.saturating_sub(1);
+    }
+    let stmts = Parser::new(tokens).parse().map_err(remap)?;
+    match stmts.as_slice() {
+        [s] => match &s.kind {
+            StmtKind::Expr(e) => Ok(e.clone()),
+            _ => Err(RscpError::parse(
+                "an f-string interpolation must be a single expression",
+                line,
+                col,
+                false,
+            )),
+        },
+        _ => Err(RscpError::parse(
+            "an f-string interpolation must be a single expression",
+            line,
+            col,
+            false,
+        )),
+    }
+}
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -466,6 +508,7 @@ impl Parser {
                 CaretAssign => AssignOp::BitXorSet,
                 ShlAssign => AssignOp::ShlSet,
                 ShrAssign => AssignOp::ShrSet,
+                StarStarAssign => AssignOp::PowSet,
                 _ => unreachable!(),
             };
             if want_semi {
@@ -512,6 +555,7 @@ impl Parser {
             CaretAssign,
             ShlAssign,
             ShrAssign,
+            StarStarAssign,
         ] {
             if let Some(t) = self.match_ty(ty) {
                 return Some(t);
@@ -771,8 +815,23 @@ impl Parser {
                 tok.col,
             ))
         } else {
-            self.postfix()
+            self.power()
         }
+    }
+
+    /// `a ** b` — exponentiation, right-associative (`2**3**2` is `2**9`)
+    /// and binding tighter than unary minus, like Python: `-2**2` is `-4`.
+    fn power(&mut self) -> PResult<Expr> {
+        let base = self.postfix()?;
+        if let Some(op) = self.match_ty(TokenType::StarStar) {
+            let rhs = self.unary()?; // allows `-x` and chained `**`
+            return Ok(Expr::new(
+                ExprKind::Binary { op: BinaryOp::Pow, lhs: Box::new(base), rhs: Box::new(rhs) },
+                op.line,
+                op.col,
+            ));
+        }
+        Ok(base)
     }
 
     fn postfix(&mut self) -> PResult<Expr> {
@@ -848,6 +907,23 @@ impl Parser {
                     _ => unreachable!(),
                 };
                 Ok(Expr::new(ExprKind::Str(v), line, col))
+            }
+            FStr => {
+                self.advance();
+                let raw = match tok.lit {
+                    Some(Lit::FStr(raw)) => raw,
+                    _ => unreachable!(),
+                };
+                let mut parts = Vec::with_capacity(raw.len());
+                for p in raw {
+                    parts.push(match p {
+                        crate::token::FStrPart::Lit(s) => FStrPart::Lit(s),
+                        crate::token::FStrPart::Expr(src, eline, ecol) => {
+                            FStrPart::Expr(parse_interp(&src, eline, ecol)?)
+                        }
+                    });
+                }
+                Ok(Expr::new(ExprKind::FStr(parts), line, col))
             }
             True => {
                 self.advance();

@@ -1,0 +1,30 @@
+// Strings: f-strings, the string builtins and the ** operator.
+
+let names = ["alice", "bob", "carol"]
+for name in names {
+    println(f"{upper(name)} has {len(name)} letters")
+}
+
+// The classic greeting, assembled three ways.
+let who = "world"
+println("hello, " + who + "!")
+println(join(["hello", who + "!"], ", "))
+println(f"hello, {who}!")
+
+// slice() with negative bounds works on strings and arrays.
+let s = "rscp is fun"
+println(slice(s, 0, 4), "|", slice(s, -3, 99), "|", slice([1, 2, 3, 4, 5], -3, -1))
+
+// Split, transform, join.
+let csv = "10,20,30"
+var doubled = []
+for part in split(csv, ",") {
+    push(doubled, str(int(part) ** 2))
+}
+println(join(doubled, "; "))
+
+// find() + slice() = a poor man's parser.
+let url = "example.com/path/to/file"
+let slash = find(url, "/")
+println(f"host: {slice(url, 0, slash)}, rest: {slice(url, slash, 99)}")
+println(repeat("-", 20), " done")

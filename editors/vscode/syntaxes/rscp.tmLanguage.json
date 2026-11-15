@@ -3,13 +3,48 @@
   "name": "RSCP",
   "scopeName": "source.rscp",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#strings" },
-    { "include": "#numbers" },
-    { "include": "#keywords" },
-    { "include": "#builtins" },
-    { "include": "#functions" },
-    { "include": "#operators" }
+    {
+      "name": "string.interpolated.rscp",
+      "begin": "\\bf\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.rscp",
+          "match": "\\\\(n|t|r|0|\\\\|\"|')|\\{\\{|\\}\\}"
+        },
+        {
+          "name": "meta.embedded.line.rscp",
+          "begin": "\\{",
+          "end": "\\}",
+          "patterns": [
+            {
+              "include": "$self"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#operators"
+    }
   ],
   "repository": {
     "comments": {
@@ -84,7 +119,7 @@
     },
     "builtins": {
       "name": "support.function.builtin.rscp",
-      "match": "\\b(print|println|len|str|int|float|type|abs|min|max|sqrt|pow|rand|clock|push|pop|keys|has|assert|panic)\\b(?=\\s*\\()"
+      "match": "\\b(print|println|len|str|int|float|type|abs|min|max|sqrt|pow|rand|clock|push|pop|keys|has|assert|panic|upper|lower|trim|split|join|replace|contains|starts_with|ends_with|slice|find|repeat|ord|chr)\\b(?=\\s*\\()"
     },
     "functions": {
       "patterns": [
@@ -92,14 +127,18 @@
           "name": "meta.function.definition.rscp",
           "match": "\\bfn\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
           "captures": {
-            "1": { "name": "entity.name.function.rscp" }
+            "1": {
+              "name": "entity.name.function.rscp"
+            }
           }
         },
         {
           "name": "meta.function-call.rscp",
           "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
           "captures": {
-            "1": { "name": "entity.name.function.call.rscp" }
+            "1": {
+              "name": "entity.name.function.call.rscp"
+            }
           }
         }
       ]
@@ -108,7 +147,7 @@
       "patterns": [
         {
           "name": "keyword.operator.assignment.compound.rscp",
-          "match": "\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>=|\\+\\+|--"
+          "match": "\\+=|-=|\\*=|/=|%=|\\*\\*=|&=|\\|=|\\^=|<<=|>>=|\\+\\+|--"
         },
         {
           "name": "keyword.operator.bitwise.rscp",
@@ -144,7 +183,7 @@
         },
         {
           "name": "keyword.operator.arithmetic.rscp",
-          "match": "\\+|-|\\*|/|%"
+          "match": "\\+|-|\\*\\*|\\*|/|%"
         },
         {
           "name": "keyword.operator.ternary.rscp",

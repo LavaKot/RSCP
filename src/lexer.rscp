@@ -17,8 +17,8 @@ fn ends_statement(ty: TokenType) -> bool {
     use TokenType::*;
     matches!(
         ty,
-        Ident | Int | Float | Str | True | False | Null | Return | Break | Continue | RParen
-            | RBracket | RBrace | PlusPlus | MinusMinus
+        Ident | Int | Float | Str | FStr | True | False | Null | Return | Break | Continue
+            | RParen | RBracket | RBrace | PlusPlus | MinusMinus
     )
 }
 
@@ -112,7 +112,13 @@ impl<'src> Lexer<'src> {
     /// Scan one non-trivia token: identifier, number, string or operator.
     fn scan_token(&mut self) -> Result<Token, RscpError> {
         match self.peek() {
-            Some(c) if c.is_ascii_alphabetic() || c == '_' => Ok(self.identifier()),
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                let t = self.identifier();
+                if t.ty == TokenType::Error {
+                    return Err(RscpError::lex(t.lexeme, t.line, t.col));
+                }
+                Ok(t)
+            }
             Some(c) if c.is_ascii_digit() => self.number(),
             Some('"') => self.string(),
             Some('.') if self.peek_second().map_or(false, |c| c.is_ascii_digit()) => self.number(),
@@ -199,9 +205,141 @@ impl<'src> Lexer<'src> {
                 break;
             }
         }
+        // `f"…"` starts an f-string; a plain `f` is just an identifier.
+        if self.pos - start == 1 && self.src.as_bytes()[start] == b'f' && self.peek() == Some('"')
+        {
+            return self.fstring(start, line, col);
+        }
         let text = &self.src[start..self.pos];
         let ty = keyword(text).unwrap_or(TokenType::Ident);
         self.tok(ty, start, line, col, None)
+    }
+
+    /// f"hello {name}, 1+1 = {1+1}" — a string with `{expression}` holes.
+    /// `{{` and `}}` are literal braces. The hole sources are kept raw and
+    /// re-lexed by the parser with corrected positions. Errors come back as
+    /// `TokenType::Error` tokens (the driver converts them).
+    fn fstring(&mut self, start: usize, line: usize, col: usize) -> Token {
+        use crate::token::FStrPart;
+        let err = |msg: &str, l: usize, c: usize| -> Token {
+            Token {
+                ty: TokenType::Error,
+                lexeme: msg.to_string(),
+                lit: None,
+                line: l,
+                col: c,
+            }
+        };
+        let unterminated = "unterminated f-string literal (missing '\"')";
+        self.advance(); // opening quote
+        let mut parts: Vec<FStrPart> = Vec::new();
+        let mut lit = String::new();
+        loop {
+            match self.peek() {
+                None | Some('\n') => return err(unterminated, line, col),
+                Some('"') => {
+                    self.advance();
+                    if !lit.is_empty() || parts.is_empty() {
+                        parts.push(FStrPart::Lit(std::mem::take(&mut lit)));
+                    }
+                    return self.tok(TokenType::FStr, start, line, col, Some(Lit::FStr(parts)));
+                }
+                Some('{') if self.peek_second() == Some('{') => {
+                    self.advance();
+                    self.advance();
+                    lit.push('{');
+                }
+                Some('}') if self.peek_second() == Some('}') => {
+                    self.advance();
+                    self.advance();
+                    lit.push('}');
+                }
+                Some('{') => {
+                    // Collect the raw expression source until the matching
+                    // '}', tracking brace nesting and copying nested strings
+                    // verbatim so the re-lexer sees them.
+                    if !lit.is_empty() {
+                        parts.push(FStrPart::Lit(std::mem::take(&mut lit)));
+                    }
+                    let (eline, ecol) = (self.line, self.col + 1);
+                    self.advance(); // '{'
+                    let expr_start = self.pos;
+                    let mut depth = 1usize;
+                    loop {
+                        match self.peek() {
+                            None | Some('\n') => {
+                                return err("unterminated '{' in f-string (missing '}')", line, col);
+                            }
+                            Some('{') => {
+                                depth += 1;
+                                self.advance();
+                            }
+                            Some('}') => {
+                                depth -= 1;
+                                self.advance();
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            Some('"') => {
+                                self.advance();
+                                loop {
+                                    match self.peek() {
+                                        Some('\\') => {
+                                            self.advance();
+                                            self.advance();
+                                        }
+                                        Some('"') => {
+                                            self.advance();
+                                            break;
+                                        }
+                                        Some('\n') | None => {
+                                            return err(
+                                                "unterminated string inside f-string",
+                                                line,
+                                                col,
+                                            );
+                                        }
+                                        Some(_) => {
+                                            self.advance();
+                                        }
+                                    }
+                                }
+                            }
+                            Some(_) => {
+                                self.advance();
+                            }
+                        }
+                    }
+                    let src = self.src[expr_start..self.pos - 1].trim().to_string();
+                    if src.is_empty() {
+                        return err("empty '{}' expression in f-string", eline, ecol);
+                    }
+                    parts.push(FStrPart::Expr(src, eline, ecol));
+                }
+                Some('\\') => {
+                    let (el, ec) = (self.line, self.col);
+                    self.advance();
+                    let escaped = match self.advance() {
+                        Some('n') => '\n',
+                        Some('t') => '\t',
+                        Some('r') => '\r',
+                        Some('0') => '\0',
+                        Some('\\') => '\\',
+                        Some('"') => '"',
+                        Some('\'') => '\'',
+                        Some(other) => {
+                            return err(&format!("unknown escape sequence '\\{other}'"), el, ec);
+                        }
+                        None => return err(unterminated, line, col),
+                    };
+                    lit.push(escaped);
+                }
+                Some(_) => {
+                    lit.push(self.advance().unwrap());
+                }
+            }
+        }
     }
 
     fn number(&mut self) -> Result<Token, RscpError> {
@@ -448,6 +586,15 @@ impl<'src> Lexer<'src> {
                     self.advance();
                     StarAssign
                 }
+                Some('*') => {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        StarStarAssign
+                    } else {
+                        StarStar
+                    }
+                }
                 _ => Star,
             },
             '/' => match second {
@@ -607,6 +754,7 @@ mod tests {
                 Lit::Int(i) => format!("i{i}"),
                 Lit::Float(f) => format!("f{f:?}"),
                 Lit::Str(s) => format!("s{s}"),
+                Lit::FStr(_) => "fs".to_string(),
             })
             .collect();
         assert_eq!(
@@ -647,6 +795,9 @@ mod tests {
                 Shr, ShrAssign, Int, Amp, Int, Eof
             ]
         );
+        // Exponentiation.
+        let ts = types("2 ** 3  2 **= 3  2 * 3");
+        assert_eq!(ts, vec![Int, StarStar, Int, Int, StarStarAssign, Int, Int, Star, Int, Eof]);
     }
 
     #[test]

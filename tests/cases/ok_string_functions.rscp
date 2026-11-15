@@ -1,0 +1,14 @@
+// String and sequence builtins: upper lower trim split join replace
+// contains starts_with ends_with slice find repeat ord chr.
+let s = "  Hello, RSCP!  "
+println(upper(s), "|", lower(s), "|", trim(s))
+println(split("a,b,,c", ","), len(split("a,b,,c", ",")))
+println(join(["a", "b", "c"], "+"))
+println(replace("banana", "na", "NA"), contains("banana", "nan"), find("banana", "na"))
+println(starts_with(s, "  He"), ends_with(s, "!  "))
+println(slice("hello world", 6, 11), slice("hello", -4, -2), slice("hello", 3, 2))
+println(slice([10, 20, 30, 40], -2, 99))
+println(repeat("=", 10))
+println(ord("Ω"), chr(960), ord("A") + 2, chr(ord("a") - 32))
+var words = split("rscp is fun", " ")
+println(len(words), words[0], upper(words[2]))

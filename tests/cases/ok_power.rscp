@@ -1,0 +1,12 @@
+// The ** operator: exact int powers, right associativity, float promotion,
+// compound **=, and the precedence interaction with unary minus and *.
+println(2 ** 10, 3 ** 0, (-2) ** 3, -2 ** 2)
+println(2 ** 3 ** 2, 2 * 3 ** 2, (2 * 3) ** 2)
+println(2 ** -2, 9 ** 0.5, 2.5 ** 2)
+var base = 3
+base **= 3
+println(base)
+let big = 10 ** 18
+println(big, type(big), type(2 ** -1))
+fn pow_sum(a, b) -> a ** 2 + b ** 2
+println(pow_sum(3, 4))

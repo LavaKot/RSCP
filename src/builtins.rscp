@@ -33,6 +33,20 @@ pub fn install(vm: &mut Vm) {
     vm.define_native("has", n_has);
     vm.define_native("assert", n_assert);
     vm.define_native("panic", n_panic);
+    vm.define_native("upper", n_upper);
+    vm.define_native("lower", n_lower);
+    vm.define_native("trim", n_trim);
+    vm.define_native("split", n_split);
+    vm.define_native("join", n_join);
+    vm.define_native("replace", n_replace);
+    vm.define_native("contains", n_contains);
+    vm.define_native("starts_with", n_starts_with);
+    vm.define_native("ends_with", n_ends_with);
+    vm.define_native("slice", n_slice);
+    vm.define_native("find", n_find);
+    vm.define_native("repeat", n_repeat);
+    vm.define_native("ord", n_ord);
+    vm.define_native("chr", n_chr);
 }
 
 fn join_display(args: &[Value]) -> String {
@@ -302,6 +316,205 @@ fn n_panic(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     match args.len() {
         0 => Err("panic".to_string()),
         _ => Err(args[0].display_string(0)),
+    }
+}
+
+// ---- string and sequence helpers ------------------------------------------
+
+fn one_string(name: &str, args: &[Value]) -> Result<Rc<str>, String> {
+    let v = one_arg(name, args)?;
+    match v {
+        Value::Str(s) => Ok(s),
+        other => Err(format!("{name}: expected a string, got {}", other.type_name())),
+    }
+}
+
+fn two_strings(name: &str, args: &[Value]) -> Result<(Rc<str>, Rc<str>), String> {
+    if args.len() != 2 {
+        return Err(format!("{name}: expected 2 arguments, got {}", args.len()));
+    }
+    match (&args[0], &args[1]) {
+        (Value::Str(a), Value::Str(b)) => Ok((a.clone(), b.clone())),
+        (other, _) => Err(format!("{name}: expected strings, got {}", other.type_name())),
+    }
+}
+
+fn n_upper(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let s = one_string("upper", &args)?;
+    Ok(Value::str(s.to_uppercase()))
+}
+
+fn n_lower(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let s = one_string("lower", &args)?;
+    Ok(Value::str(s.to_lowercase()))
+}
+
+fn n_trim(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let s = one_string("trim", &args)?;
+    Ok(Value::str(s.trim()))
+}
+
+fn n_split(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let (s, sep) = two_strings("split", &args)?;
+    if sep.is_empty() {
+        return Err("split: the separator must not be empty".to_string());
+    }
+    let parts: Vec<Value> = s.split(sep.as_ref()).map(Value::str).collect();
+    Ok(Value::Array(Rc::new(RefCell::new(parts))))
+}
+
+fn n_join(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err(format!("join: expected 2 arguments (array, separator), got {}", args.len()));
+    }
+    let sep = match &args[1] {
+        Value::Str(s) => s.clone(),
+        other => return Err(format!("join: the separator must be a string, got {}", other.type_name())),
+    };
+    match &args[0] {
+        Value::Array(a) => {
+            let parts: Vec<String> = a.borrow().iter().map(|v| v.display_string(0)).collect();
+            Ok(Value::str(parts.join(sep.as_ref())))
+        }
+        other => Err(format!("join: expected an array, got {}", other.type_name())),
+    }
+}
+
+fn n_replace(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if args.len() != 3 {
+        return Err(format!("replace: expected 3 arguments (string, from, to), got {}", args.len()));
+    }
+    let s = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => return Err(format!("replace: expected a string, got {}", other.type_name())),
+    };
+    let (from, to) = match (&args[1], &args[2]) {
+        (Value::Str(a), Value::Str(b)) => (a.clone(), b.clone()),
+        (other, _) => return Err(format!("replace: from/to must be strings, got {}", other.type_name())),
+    };
+    if from.is_empty() {
+        return Err("replace: 'from' must not be empty".to_string());
+    }
+    Ok(Value::str(s.replace(from.as_ref(), to.as_ref())))
+}
+
+fn n_contains(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    match (&args.get(0), &args.get(1)) {
+        (Some(Value::Array(a)), Some(v)) => {
+            let found = a.borrow().iter().any(|item| item.equals(v));
+            Ok(Value::Bool(found))
+        }
+        (Some(Value::Str(_)), Some(_)) => {
+            let (s, sub) = two_strings("contains", &args)?;
+            Ok(Value::Bool(s.contains(sub.as_ref())))
+        }
+        (Some(other), _) => Err(format!(
+            "contains: expected a string or array, got {}",
+            other.type_name()
+        )),
+        _ => Err(format!("contains: expected 2 arguments, got {}", args.len())),
+    }
+}
+
+fn n_starts_with(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let (s, prefix) = two_strings("starts_with", &args)?;
+    Ok(Value::Bool(s.starts_with(prefix.as_ref())))
+}
+
+fn n_ends_with(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let (s, suffix) = two_strings("ends_with", &args)?;
+    Ok(Value::Bool(s.ends_with(suffix.as_ref())))
+}
+
+/// Clamp a Python-style slice index (negatives count from the end) into
+/// `0..=len` for a collection of `len` elements.
+fn clamp_slice_index(i: i64, len: usize, what: &str) -> Result<usize, String> {
+    let len = len as i64;
+    let i = if i < 0 { i + len } else { i };
+    if i < 0 {
+        return Ok(0);
+    }
+    if i > len {
+        return Ok(len as usize);
+    }
+    let _ = what;
+    Ok(i as usize)
+}
+
+/// slice(s, a, b) / slice(arr, a, b): a substring/subarray, `b` exclusive,
+/// negative indices count from the end, out-of-range clamps (Python-style).
+fn n_slice(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if args.len() != 3 {
+        return Err(format!("slice: expected 3 arguments (value, start, end), got {}", args.len()));
+    }
+    let (a, b) = match (&args[1], &args[2]) {
+        (Value::Int(a), Value::Int(b)) => (*a, *b),
+        (other, _) => return Err(format!("slice: the bounds must be ints, got {}", other.type_name())),
+    };
+    match &args[0] {
+        Value::Str(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let lo = clamp_slice_index(a, chars.len(), "string")?;
+            let hi = clamp_slice_index(b, chars.len(), "string")?.max(lo);
+            Ok(Value::str(chars[lo..hi].iter().collect::<String>()))
+        }
+        Value::Array(items) => {
+            let len = items.borrow().len();
+            let lo = clamp_slice_index(a, len, "array")?;
+            let hi = clamp_slice_index(b, len, "array")?.max(lo);
+            let part: Vec<Value> = items.borrow()[lo..hi].to_vec();
+            Ok(Value::Array(Rc::new(RefCell::new(part))))
+        }
+        other => Err(format!("slice: expected a string or array, got {}", other.type_name())),
+    }
+}
+
+/// find(s, sub): index of the first occurrence, or -1.
+fn n_find(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let (s, sub) = two_strings("find", &args)?;
+    match s.find(sub.as_ref()) {
+        Some(byte_pos) => Ok(Value::Int(s[..byte_pos].chars().count() as i64)),
+        None => Ok(Value::Int(-1)),
+    }
+}
+
+fn n_repeat(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    if args.len() != 2 {
+        return Err(format!("repeat: expected 2 arguments, got {}", args.len()));
+    }
+    let s = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => return Err(format!("repeat: expected a string, got {}", other.type_name())),
+    };
+    let n = match &args[1] {
+        Value::Int(i) if *i >= 0 => *i as usize,
+        Value::Int(_) => return Err("repeat: the count must be >= 0".to_string()),
+        other => return Err(format!("repeat: the count must be an int, got {}", other.type_name())),
+    };
+    if (s.chars().count() as u64) * (n as u64) > 1_000_000 {
+        return Err("repeat: the result would be too large (max 1 000 000 chars)".to_string());
+    }
+    Ok(Value::str(s.repeat(n)))
+}
+
+/// ord(s): the code point of the first character.
+fn n_ord(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let s = one_string("ord", &args)?;
+    match s.chars().next() {
+        Some(c) => Ok(Value::Int(c as i64)),
+        None => Err("ord: the string is empty".to_string()),
+    }
+}
+
+/// chr(i): the character with that code point.
+fn n_chr(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
+    let v = one_arg("chr", &args)?;
+    match v {
+        Value::Int(i) => match u32::try_from(i).ok().and_then(char::from_u32) {
+            Some(c) => Ok(Value::str(c.to_string())),
+            None => Err(format!("chr: {i} is not a valid Unicode code point")),
+        },
+        other => Err(format!("chr: expected an int, got {}", other.type_name())),
     }
 }
 

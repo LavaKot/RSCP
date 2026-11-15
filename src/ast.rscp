@@ -19,6 +19,7 @@ pub enum BinaryOp {
     Mul,
     Div,
     Mod,
+    Pow,
     BitAnd,
     BitOr,
     BitXor,
@@ -53,6 +54,7 @@ pub enum AssignOp {
     BitXorSet, // ^=
     ShlSet,    // <<=
     ShrSet,    // >>=
+    PowSet,    // **=
 }
 
 impl AssignOp {
@@ -70,6 +72,7 @@ impl AssignOp {
             AssignOp::BitXorSet => Some(BinaryOp::BitXor),
             AssignOp::ShlSet => Some(BinaryOp::Shl),
             AssignOp::ShrSet => Some(BinaryOp::Shr),
+            AssignOp::PowSet => Some(BinaryOp::Pow),
         }
     }
 }
@@ -123,6 +126,13 @@ pub struct MatchArm {
     pub body: MatchBody,
 }
 
+/// One chunk of an f-string expression: literal text or a sub-expression.
+#[derive(Debug, Clone)]
+pub enum FStrPart {
+    Lit(String),
+    Expr(Expr),
+}
+
 /// An expression node.
 #[derive(Debug, Clone)]
 pub struct Expr {
@@ -145,6 +155,8 @@ pub enum ExprKind {
     Ternary { cond: Box<Expr>, then: Box<Expr>, els: Box<Expr> },
     /// `match value { arms }` — an expression producing the matched arm's value.
     Match { value: Box<Expr>, arms: Vec<MatchArm> },
+    /// f"hello {name}" — literal chunks and interpolated expressions.
+    FStr(Vec<FStrPart>),
     Call { callee: Box<Expr>, args: Vec<Expr> },
     Index { obj: Box<Expr>, idx: Box<Expr> },
     /// `start..end` (exclusive) or `start..=end` (inclusive).

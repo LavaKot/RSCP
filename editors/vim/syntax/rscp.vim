@@ -1,4 +1,4 @@
-" Vim syntax file for RSCP 2026.3.0.0
+" Vim syntax file for RSCP 2026.3.1.0
 " Place in ~/.vim/syntax/rscp.vim (or ~/.config/nvim/syntax/rscp.vim),
 " together with the ftdetect rule from editors/vim/ftdetect/rscp.vim.
 
@@ -16,7 +16,8 @@ syntax keyword rscpConstant null
 
 " Built-in functions
 syntax keyword rscpBuiltin print println len str int float type abs min max
-syntax keyword rscpBuiltin sqrt pow rand clock push pop keys has assert panic
+syntax keyword rscpBuiltin sqrt pow rand clock push pop keys has assert panic upper lower trim
+syntax keyword rscpBuiltin split join replace contains starts_with ends_with slice find repeat ord chr
 
 " Comments
 syntax match rscpComment "//.*$" contains=rscpTodo
@@ -25,6 +26,10 @@ syntax keyword rscpTodo TODO FIXME XXX NOTE contained
 
 " Strings with escapes
 syntax region rscpString start=/"/ skip=/\\./ end=/"/ contains=rscpEscape
+" f-strings: the whole literal is a string; {holes} get expression highlighting
+syntax region rscpFString start=/\vf\"/ skip=/\\./ end=/"/ contains=rscpFInterp,rscpEscape
+syntax region rscpFInterp start=/{/ end=/}/ contained contains=rscpFInterp
+
 syntax match rscpEscape +\\[ntr0\\"']+ contained
 
 " Numbers: hex, floats (but not the dots of a range), integers
@@ -43,7 +48,7 @@ syntax match rscpFuncCall "\<\h\w*\s*\ze("
 syntax match rscpRange "\.\.=\=\."
 syntax match rscpArrow "->"
 syntax match rscpArrow "=>"
-syntax match rscpOperator "<<=\|>>=\|<<\|>>\|&=\||=\|\^=\|&\|\^\|~\|&&\|||\|!\|==\|!=\|<=\|>=\|<\|>\|+\|-\|\*\|/\|%\|=\|?\|:\|++\|--\|+="
+syntax match rscpOperator "\*\*=\|<<=\|>>=\|<<\|>>\|&=\||=\|\^=\|\*\*\|&\|\^\|~\|&&\|||\|!\|==\|!=\|<=\|>=\|<\|>\|+\|-\|\*\|/\|%\|=\|?\|:\|++\|--\|+="
 
 " Short closure pipes |x|
 syntax match rscpPipe "|"
@@ -59,6 +64,8 @@ hi def link rscpBuiltin Function
 hi def link rscpComment Comment
 hi def link rscpTodo Todo
 hi def link rscpString String
+hi def link rscpFString String
+hi def link rscpFInterp Special
 hi def link rscpEscape Special
 hi def link rscpNumber Number
 hi def link rscpFloat Float

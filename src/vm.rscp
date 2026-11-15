@@ -522,6 +522,39 @@ impl Vm {
                             )),
                         }
                     }
+                    Op::Pow => {
+                        let rhs = self.stack.pop().unwrap();
+                        let lhs = self.stack.pop().unwrap();
+                        match pow_values(lhs, rhs) {
+                            Ok(v) => self.stack.push(v),
+                            Err(msg) => rt!(op_ip, msg),
+                        }
+                    }
+                    Op::ToString => {
+                        let v = self.stack.pop().unwrap();
+                        self.stack.push(Value::str(v.display_string(0)));
+                    }
+                    Op::StrJoin => {
+                        let n = chunk.code[ip] as usize;
+                        ip += 1;
+                        if self.stack.len() < base + n {
+                            rt!(op_ip, "internal error: stack underflow in StrJoin");
+                        }
+                        let mut parts = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            let v = self.stack.pop().unwrap();
+                            match v {
+                                Value::Str(s) => parts.push(s),
+                                other => rt!(op_ip, format!(
+                                    "internal error: StrJoin of a non-string ({})",
+                                    other.type_name()
+                                )),
+                            }
+                        }
+                        parts.reverse();
+                        let joined: String = parts.concat();
+                        self.stack.push(Value::str(joined));
+                    }
                 }
             }
         }
@@ -666,6 +699,36 @@ fn arith(op: Op, lhs: Value, rhs: Value) -> Result<Value, String> {
             a.type_name(),
             b.type_name()
         )),
+    }
+}
+
+/// Exponentiation. `int ** int` stays exact while the exponent is >= 0
+/// (overflow is an error); a negative exponent (or any float operand)
+/// produces a float, like Python.
+fn pow_values(lhs: Value, rhs: Value) -> Result<Value, String> {
+    let num = |v: &Value| -> Result<f64, String> {
+        match v {
+            Value::Int(i) => Ok(*i as f64),
+            Value::Float(f) => Ok(*f),
+            other => Err(format!(
+                "'**' needs numbers, got {}",
+                other.type_name()
+            )),
+        }
+    };
+    match (&lhs, &rhs) {
+        (Value::Int(a), Value::Int(b)) if *b >= 0 => {
+            let exp = u32::try_from(*b).map_err(|_| "integer overflow in '**'".to_string())?;
+            a.checked_pow(exp)
+                .map(Value::Int)
+                .ok_or_else(|| "integer overflow in '**'".to_string())
+        }
+        (Value::Int(0), _) => Err("zero to a negative power".to_string()),
+        _ => {
+            let x = num(&lhs)?;
+            let y = num(&rhs)?;
+            Ok(Value::Float(x.powf(y)))
+        }
     }
 }
 
@@ -976,6 +1039,104 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(global(&vm, "out"), Value::Str(ref s) if &**s == "B!n"));
+    }
+
+    #[test]
+    fn power_operator() {
+        let vm = run(
+            "var a = 2 ** 10; var b = -2 ** 2; var c = 2 ** -1; var d = 2.0 ** 0.5; \
+             var e = 2 ** 3 ** 2; var f = 0 ** 0; var g = (-2) ** 2; var h = 2 ** 2 * 3;",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "a"), Value::Int(1024)));
+        assert!(matches!(global(&vm, "b"), Value::Int(-4))); // -(2**2), Python-style
+        assert!(matches!(global(&vm, "c"), Value::Float(f) if (f - 0.5).abs() < 1e-12));
+        assert!(matches!(global(&vm, "d"), Value::Float(f) if (f - 2f64.sqrt()).abs() < 1e-12));
+        assert!(matches!(global(&vm, "e"), Value::Int(512))); // right-associative
+        assert!(matches!(global(&vm, "f"), Value::Int(1)));
+        assert!(matches!(global(&vm, "g"), Value::Int(4)));
+        assert!(matches!(global(&vm, "h"), Value::Int(12))); // ** tighter than *
+        let vm = run("var x = 3; x **= 2;").unwrap();
+        assert!(matches!(global(&vm, "x"), Value::Int(9)));
+        for (src, needle) in [
+            ("var x = 0 ** -1;", "zero to a negative power"),
+            ("var x = 2 ** 100;", "overflow"),
+            ("var x = 2 ** \"s\";", "'**' needs numbers"),
+        ] {
+            let err = match run(src) {
+                Err(e) => e,
+                Ok(_) => panic!("expected a runtime error for: {src}"),
+            };
+            assert!(format!("{err}").contains(needle), "for {src}: {err}");
+        }
+    }
+
+    #[test]
+    fn f_strings() {
+        let vm = run(
+            "var name = \"RSCP\";\
+             var a = f\"hello {name}\";\
+             var b = f\"{1 + 2 * 3} items\";\
+             var c = f\"no holes\";\
+             var d = f\"braces: {{}} and {name}\";\
+             var e = f\"{upper(name)}!\";\
+             var n = 0;\
+             var f2 = f\"value={n}\";",
+        )
+        .unwrap();
+        let s = |n: &str| match global(&vm, n) {
+            Value::Str(s) => s.to_string(),
+            other => panic!("bad {n}: {other:?}"),
+        };
+        assert_eq!(s("a"), "hello RSCP");
+        assert_eq!(s("b"), "7 items");
+        assert_eq!(s("c"), "no holes");
+        assert_eq!(s("d"), "braces: {} and RSCP");
+        assert_eq!(s("e"), "RSCP!");
+        assert_eq!(s("f2"), "value=0");
+    }
+
+    #[test]
+    fn string_builtins() {
+        let vm = run(
+            "var a = upper(\"héllo\"); var b = lower(\"WORLD\"); var c = trim(\"  x  \"); \
+             var d = split(\"a,b,c\", \",\"); var e = join([1, \"two\", 3.0], \"|\"); \
+             var f = replace(\"banana\", \"na\", \"NA\"); var g = find(\"banana\", \"na\"); \
+             var h = find(\"banana\", \"x\"); var i = slice(\"hello\", -3, 100); \
+             var j = slice([1, 2, 3, 4], 1, -1); var k = contains([1, 2], 2); \
+             var l = starts_with(\"rscp\", \"rs\"); var m = repeat(\"ab\", 2); \
+             var o = ord(\"A\"); var p = chr(66);",
+        )
+        .unwrap();
+        assert!(matches!(global(&vm, "a"), Value::Str(ref s) if &**s == "HÉLLO"));
+        assert!(matches!(global(&vm, "b"), Value::Str(ref s) if &**s == "world"));
+        assert!(matches!(global(&vm, "c"), Value::Str(ref s) if &**s == "x"));
+        match global(&vm, "d") {
+            Value::Array(arr) => {
+                let items = arr.borrow();
+                assert_eq!(items.len(), 3);
+                assert!(matches!(&items[0], Value::Str(s) if &**s == "a"));
+            }
+            other => panic!("bad d: {other:?}"),
+        }
+        assert!(matches!(global(&vm, "e"), Value::Str(ref s) if &**s == "1|two|3.0"));
+        assert!(matches!(global(&vm, "f"), Value::Str(ref s) if &**s == "baNANA"));
+        assert!(matches!(global(&vm, "g"), Value::Int(2)));
+        assert!(matches!(global(&vm, "h"), Value::Int(-1)));
+        assert!(matches!(global(&vm, "i"), Value::Str(ref s) if &**s == "llo"));
+        match global(&vm, "j") {
+            Value::Array(arr) => {
+                let items = arr.borrow();
+                assert_eq!(items.len(), 2);
+                assert!(matches!(&items[0], Value::Int(2)));
+            }
+            other => panic!("bad j: {other:?}"),
+        }
+        assert!(matches!(global(&vm, "k"), Value::Bool(true)));
+        assert!(matches!(global(&vm, "l"), Value::Bool(true)));
+        assert!(matches!(global(&vm, "m"), Value::Str(ref s) if &**s == "abab"));
+        assert!(matches!(global(&vm, "o"), Value::Int(65)));
+        assert!(matches!(global(&vm, "p"), Value::Str(ref s) if &**s == "B"));
     }
 
     #[test]

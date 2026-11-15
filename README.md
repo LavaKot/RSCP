@@ -58,7 +58,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.3.0.0 — enter statements, Ctrl-D to exit.
+rscp 2026.3.1.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -90,7 +90,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.3.0.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.3.1.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -366,19 +366,20 @@ fn main() { println("then main()") }
 | Precedence (high → low) | Operators                                  |
 |-------------------------|--------------------------------------------|
 | 1                       | `()` call, `[]` index                      |
-| 2                       | unary `! - ~`                              |
-| 3                       | `* / %`                                    |
-| 4                       | `+ -` (`+` also concatenates strings/arrays)|
-| 5                       | `<< >>`                                    |
-| 6                       | `&`                                        |
-| 7                       | `^`                                        |
-| 8                       | `\|`                                       |
-| 9                       | `< <= > >=`                                |
-| 10                      | `== !=`                                    |
-| 11                      | `&&`                                       |
-| 12                      | `\|\|`                                     |
-| 13                      | `..`, `..=` (ranges, `for` iterables only)  |
-| 14                      | `? :` (right-associative)                  |
+| 2                       | `**` (right-associative, like Python)      |
+| 3                       | unary `! - ~`                              |
+| 4                       | `* / %`                                    |
+| 5                       | `+ -` (`+` also concatenates strings/arrays)|
+| 6                       | `<< >>`                                    |
+| 7                       | `&`                                        |
+| 8                       | `^`                                        |
+| 9                       | `\|`                                       |
+| 10                      | `< <= > >=`                                |
+| 11                      | `== !=`                                    |
+| 12                      | `&&`                                       |
+| 13                      | `\|\|`                                     |
+| 14                      | `..`, `..=` (ranges, `for` iterables only)  |
+| 15                      | `? :` (right-associative)                  |
 
 Like Rust, the bitwise operators bind *tighter* than comparisons
 (`a & mask == 0` means `(a & mask) == 0`) — the opposite of C's infamous
@@ -386,13 +387,15 @@ precedence trap. `&`, `|`, `^` work on two ints or two bools; `~` inverts
 an int or a bool; shifts require the amount in `0..64`. Integer literals
 come in four bases: `42`, `0x2A`, `0b101010`, `0o52` (with `_` separators).
 
-Assignment (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`,
+Assignment (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`,
 `>>=`, `++`, `--`) is a *statement*, not an expression — no `if (x = 0)`
-accidents. `==` compares numbers, strings, bools and `null` by value
-(`1 == 1.0` is `true`); arrays, maps and functions compare by identity.
-`&&`/`||` short-circuit and require bool operands; so do `if`/`while`
-conditions. Integer overflow and division by zero are runtime errors,
-not UB.
+accidents. Like Python, `**` binds tighter than unary minus (`-2 ** 2` is
+`-4`) and stays an exact `int` while the exponent is a non-negative `int`
+(overflow is an error); anything else promotes to `float`. `==` compares
+numbers, strings, bools and `null` by value (`1 == 1.0` is `true`); arrays,
+maps and functions compare by identity. `&&`/`||` short-circuit and require
+bool operands; so do `if`/`while` conditions. Integer overflow and division
+by zero are runtime errors, not UB.
 
 ### Built-in functions
 
@@ -412,6 +415,15 @@ not UB.
 | `has(map, key)` | key-presence test |
 | `assert(cond, msg?)` | runtime error if `cond` is false |
 | `panic(msg?)` | abort with a message (catchable, see the Changelog) |
+| `upper` `lower` `trim` | case and whitespace (`upper("héllo")` is `HÉLLO`) |
+| `split(s, sep)` / `join(arr, sep)` | string ↔ array |
+| `replace(s, from, to)` | replace all occurrences |
+| `contains(s, sub)` / `contains(arr, v)` | substring / member test |
+| `starts_with` / `ends_with` | prefix and suffix tests |
+| `slice(x, a, b)` | substring or subarray; negative bounds, `b` exclusive |
+| `find(s, sub)` | first char index of `sub`, or `-1` |
+| `repeat(s, n)` | `repeat("ab", 3)` is `ababab` |
+| `ord(c)` / `chr(i)` | character ↔ Unicode code point |
 
 ### Strings
 
@@ -422,6 +434,36 @@ Concatenate with `+`, compare lexicographically with `<` and friends.
 let s = "rscp" + "!"
 println(s[0], len(s), s == "rscp!")    // r 5 true
 ```
+
+A toolbox of builtins covers the everyday operations — `upper`, `lower`,
+`trim`, `split`, `join`, `replace`, `contains` (works on arrays too),
+`starts_with`, `ends_with`, `find`, `repeat`, `ord`, `chr`, and `slice`,
+which also cuts arrays and understands negative, Python-style bounds:
+
+```rust
+println(upper("héllo"))                  // HÉLLO
+println(split("a,b,c", ","))             // ["a", "b", "c"]
+println(join(["a", "b"], "-"))           // a-b
+println(replace("banana", "na", "NA"))   // baNANA
+println(find("banana", "na"))            // 2 (first index, or -1)
+println(slice("hello world", 0, 5))      // hello
+println(slice([1, 2, 3, 4], -2, 99))     // [3, 4]
+```
+
+**f-strings** (Python-style interpolation) embed any expression in `{…}`;
+`{{` and `}}` produce literal braces, and the holes nest — strings and even
+other f-strings inside:
+
+```rust
+let name = "RSCP"
+let n = 3
+println(f"{name}: {n} squared is {n ** 2}")   // RSCP: 3 squared is 9
+println(f"sum={1 + 2 * 3} nested={upper(f"{n}")}")  // sum=7 nested=3
+```
+
+The hole is parsed as a real expression at compile time, so mistakes inside
+it are syntax errors with exact positions, and the pieces are joined at
+runtime without building temporary arrays.
 
 ---
 
@@ -472,12 +514,14 @@ comparison     := shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
 shift          := term { ( "<<" | ">>" ) term } ;
 term           := factor { ( "+" | "-" ) factor } ;
 factor         := unary { ( "*" | "/" | "%" ) unary } ;
-unary          := ( "!" | "-" | "~" ) unary | postfix ;
+unary          := ( "!" | "-" | "~" ) unary | power ;
+power          := postfix [ "**" unary ] ;   (* right-assoc, tighter than unary *)
 postfix        := primary { "(" [ arguments ] ")" | "[" expression "]" } ;
 arguments      := expression { "," expression } [ "," ] ;
-primary        := INT | FLOAT | STRING | "true" | "false" | "null" | IDENT
+primary        := INT | FLOAT | STRING | FSTRING | "true" | "false" | "null" | IDENT
                 | "(" expression ")" | arrayLit | mapLit | "fn" funcBody
                 | matchExpr | closure ;
+FSTRING        := 'f"' { litChar | "{{" | "}}" | "{" expression "}" } '"' ;
 matchExpr      := "match" expression "{" arm { ( "," | ";" )* arm } [ "," ] "}" ;
 arm            := pattern { "|" pattern } [ "if" expression ] "=>"
                   ( expression | block ) ;
@@ -593,14 +637,14 @@ Design highlights:
 cargo test
 ```
 
-* **51 unit tests** across lexer (including the semicolon-insertion rules),
+* **54 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **80 golden cases** in `tests/cases/`: each program's exact stdout is
+* **86 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
-* **7 showcase examples** are smoke-tested (`examples/`).
+* **8 showcase examples** are smoke-tested (`examples/`).
 * The CLI surface itself is tested (exit codes, subcommands).
 
 ---
@@ -641,13 +685,23 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.3.0` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.3.0.0`), release
+(`2026.3.1` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.3.1.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.3.1.0** — strings, interpolation and `**`. f-strings
+  (`f"n={n}, sq={n ** 2}"`) embed any expression, support `{{`/`}}` escapes
+  and nest; the holes are parsed at compile time with exact positions. The
+  `**` operator (and `**=`) is exact for `int ** int` with a non-negative
+  exponent, promotes to float otherwise, is right-associative and binds
+  tighter than unary minus — Python's rules. Thirteen new builtins:
+  `upper lower trim split join replace contains starts_with ends_with
+  slice find repeat ord chr` (`slice` also cuts arrays, with negative
+  Python-style bounds; `contains` also searches arrays). 54 unit tests,
+  86 golden cases, new `examples/strings.rscp`.
 * **2026.3.0.0** — pattern matching and bitwise operations.
   `match` is a full expression: literal patterns, alternation (`1 | 2`),
   integer ranges (`3..=9`), `if` guards, bindings (`k if k < 0 => …`),

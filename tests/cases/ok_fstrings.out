@@ -1,0 +1,9 @@
+hello RSCP, 3 squared is 9
+no holes at all
+sum=7 cmp=true list=[3, 6]
+nested: 3 and 2
+braces: {kept} and RSCP
+step 1: running total 1
+step 2: running total 3
+step 3: running total 6
+3 * 2 = 6 9

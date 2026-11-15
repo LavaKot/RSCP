@@ -6,6 +6,18 @@ pub enum Lit {
     Int(i64),
     Float(f64),
     Str(String),
+    /// An f-string: literal chunks alternating with raw expression sources
+    /// plus the position where each expression starts.
+    FStr(Vec<FStrPart>),
+}
+
+/// One chunk of an f-string literal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FStrPart {
+    /// Literal text (escapes already processed, `{{`/`}}` unescaped).
+    Lit(String),
+    /// Raw expression source and its (line, col) in the original file.
+    Expr(String, usize, usize),
 }
 
 /// Every lexical token type in RSCP.
@@ -15,6 +27,7 @@ pub enum TokenType {
     Int,
     Float,
     Str,
+    FStr,
     Ident,
     // Keywords
     Fn,
@@ -61,10 +74,12 @@ pub enum TokenType {
     CaretAssign,
     ShlAssign,
     ShrAssign,
+    StarStarAssign,
     // Arithmetic operators
     Plus,
     Minus,
     Star,
+    StarStar,
     Slash,
     Percent,
     // Bitwise operators
@@ -88,6 +103,9 @@ pub enum TokenType {
     Not,
     // End of input
     Eof,
+    /// Internal: a lexical error carried out of scanners that cannot fail
+    /// (f-strings). The lexer driver turns it into an `RscpError`.
+    Error,
 }
 
 impl TokenType {
@@ -98,6 +116,7 @@ impl TokenType {
             Int => "an integer literal",
             Float => "a float literal",
             Str => "a string literal",
+            FStr => "an f-string literal",
             Ident => "an identifier",
             Fn => "'fn'",
             Let => "'let'",
@@ -141,9 +160,11 @@ impl TokenType {
             CaretAssign => "'^='",
             ShlAssign => "'<<='",
             ShrAssign => "'>>='",
+            StarStarAssign => "'**='",
             Plus => "'+'",
             Minus => "'-'",
             Star => "'*'",
+            StarStar => "'**'",
             Slash => "'/'",
             Percent => "'%'",
             Amp => "'&'",
@@ -163,6 +184,7 @@ impl TokenType {
             OrOr => "'||'",
             Not => "'!'",
             Eof => "end of input",
+            Error => "an invalid token",
         };
         s.to_string()
     }

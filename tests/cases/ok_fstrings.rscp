@@ -1,0 +1,16 @@
+// f-strings: interpolation of any expression, nested strings and f-strings,
+// {{ }} escapes, literal-only f-strings.
+let name = "RSCP"
+let n = 3
+println(f"hello {name}, {n} squared is {n ** 2}")
+println(f"no holes at all")
+println(f"sum={1 + 2 * 3} cmp={n >= 3} list={[n, n * 2]}")
+println(f"nested: {upper(f"{n}")} and {len("ab")}")
+println(f"braces: {{kept}} and {name}")
+var total = 0
+for i in 1..=3 {
+    total += i
+    println(f"step {i}: running total {total}")
+}
+let msg = f"{n} * 2 = {n * 2}"
+println(msg, len(msg))

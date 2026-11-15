@@ -142,5 +142,12 @@
       "}"
     ],
     "description": "match expression"
+  },
+  "f-string": {
+    "prefix": "fstring",
+    "body": [
+      "f\"${1:text} {${2:expr}} ${3:more}\""
+    ],
+    "description": "f-string with an interpolation"
   }
 }
