@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.12.0 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.1 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.12.0.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.1.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -304,7 +304,7 @@ carries over; this is feature release #12).
 | 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So this release is `26.0.10.0` (`v26.0.12.0`); a hotfix on top of it would
+So this release is `26.0.10.0` (`v26.0.12.1`); a hotfix on top of it would
 be `26.0.10.1`, and the next feature release `26.0.11.0`. While the second
 number is `0`, GitHub releases are titled **"Beta …"** (e.g. "Beta
 26.0.10.0"); from the first stable release the prefix disappears.
@@ -317,6 +317,12 @@ README.
 
 ## Changelog
 
+* **26.0.12.1** — local mutual recursion works. Sibling `fn` statements in
+  a function body or block pre-declare their cells, so `fn ping` can call a
+  `fn pong` declared after it — the call resolves as an upvalue, not as an
+  undefined global (found by `scripts/holes.py`, RSCP's new systematic
+  probe suite).
+* **26.0.12.0** — get(), literal payload patterns, and the calculator
 * **26.0.12.0** — get(), literal payload patterns, and the calculator
   example. `get(m, k, default?)` is the Option-style read: the value or the
   default (null) when the key is missing — maps, arrays and strings,

@@ -1,0 +1,26 @@
+# Local mutual recursion (26.0.12.1): sibling fns pre-declare their cells,
+# so a fn can call a sibling declared after it.
+fn outer() {
+    fn ping(n) { if n == 0 { return "done" } return pong(n - 1) }
+    fn pong(n) { return ping(n - 1) }
+    return ping(4)
+}
+println(outer())
+
+# Three-way recursion through a block scope.
+fn three() {
+    var hits = []
+    fn a(n) { if n == 0 { return hits } push(hits, "a") ; return b(n - 1) }
+    fn b(n) { push(hits, "b") ; return c(n) }
+    fn c(n) { push(hits, "c") ; return a(n) }
+    return a(2)
+}
+println(join(three(), ""))
+
+# Capturing a pre-declared sibling still closes correctly.
+fn keeper() {
+    fn val() -> 7
+    fn wrap() -> val() * 2
+    return wrap
+}
+println(keeper()())
