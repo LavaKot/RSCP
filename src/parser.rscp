@@ -1530,6 +1530,29 @@ impl Parser {
     }
 
     /// One match pattern: a literal, a range, a binding or a catch-all.
+    /// One element of an enum-variant pattern's payload (26.0.12.0):
+    /// a literal, a binding name, or `_`.
+    fn variant_field(&mut self) -> PResult<VariantField> {
+        use TokenType::*;
+        match self.peek_ty() {
+            Int | Float | Str | True | False | Null => {
+                Ok(VariantField::Lit(self.pattern()?))
+            }
+            Ident if self.peek().lexeme == "_" => {
+                self.advance();
+                Ok(VariantField::Wild)
+            }
+            Ident => {
+                let b = self.advance();
+                Ok(VariantField::Bind(b.lexeme.clone()))
+            }
+            other => Err(self.error_here(format!(
+                "expected a literal, a binding or '_' in the variant pattern, found {}",
+                other.describe()
+            ))),
+        }
+    }
+
     fn pattern(&mut self) -> PResult<Pattern> {
         use TokenType::*;
         let tok = self.peek().clone();
@@ -1595,25 +1618,24 @@ impl Parser {
                 if self.check(TokenType::Dot) {
                     self.advance(); // .
                     let v = self.expect(TokenType::Ident, "a variant name after '.'")?;
-                    let mut bindings = Vec::new();
+                    let mut fields = Vec::new();
                     if self.match_ty(TokenType::LParen).is_some() {
                         loop {
                             if self.check(TokenType::RParen) {
                                 break;
                             }
-                            let b = self.expect(TokenType::Ident, "a binding name in the variant pattern")?;
-                            bindings.push(b.lexeme.clone());
+                            fields.push(self.variant_field()?);
                             if self.match_ty(TokenType::Comma).is_some() {
                                 continue;
                             }
                             break;
                         }
-                        self.expect(TokenType::RParen, "')' after the pattern bindings")?;
+                        self.expect(TokenType::RParen, "')' after the variant fields")?;
                     }
                     return Ok(Pattern::EnumVariant {
                         enum_name: tok.lexeme.clone(),
                         variant: v.lexeme.clone(),
-                        bindings,
+                        fields,
                     });
                 }
                 Ok(Pattern::Binding(tok.lexeme.clone()))

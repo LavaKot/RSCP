@@ -32,6 +32,7 @@ pub fn install(vm: &mut Vm) {
     vm.define_native("pop", n_pop);
     vm.define_native("keys", n_keys);
     vm.define_native("has", n_has);
+    vm.define_native("get", n_get);
     vm.define_native("assert", n_assert);
     vm.define_native("panic", n_panic);
     vm.define_native("error", n_error);
@@ -310,6 +311,59 @@ fn n_has(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
         ))),
         (other, _) => Err(RtError::boxed("ARG", format!(
             "has: expected a map, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// `get(m, k, default?)` — Option-style access (26.0.12.0): the value at
+/// `k`, or `default` (null when omitted) if the key is missing. Arrays and
+/// strings work too, with negative indexes counting from the end; only a
+/// wrong container/key type is an error — an absent member never is.
+fn n_get(_vm: &mut Vm, args: &[Value]) -> Result<Value, Box<RtError>> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(RtError::boxed("ARG", format!(
+            "get: expected 2 or 3 arguments (map, key, default?), got {}",
+            args.len()
+        )));
+    }
+    let default = if args.len() == 3 { args[2].clone() } else { Value::Null };
+    match (&args[0], &args[1]) {
+        (Value::Map(m), Value::Str(k)) => {
+            Ok(m.borrow().get(&**k).cloned().unwrap_or(default))
+        }
+        (Value::Map(_), other) => Err(RtError::boxed("ARG", format!(
+            "get: the key must be a string, got {}",
+            other.type_name()
+        ))),
+        (Value::Array(items), Value::Int(i)) => {
+            let n = items.borrow().len() as i64;
+            let at = if *i < 0 { i + n } else { *i };
+            if at < 0 || at >= n {
+                Ok(default)
+            } else {
+                Ok(items.borrow()[at as usize].clone())
+            }
+        }
+        (Value::Array(_), other) => Err(RtError::boxed("ARG", format!(
+            "get: the index must be an int, got {}",
+            other.type_name()
+        ))),
+        (Value::Str(s), Value::Int(i)) => {
+            let n = s.chars().count() as i64;
+            let at = if *i < 0 { i + n } else { *i };
+            if at < 0 || at >= n {
+                Ok(default)
+            } else {
+                Ok(Value::str(s.chars().nth(at as usize).unwrap().to_string()))
+            }
+        }
+        (Value::Str(_), other) => Err(RtError::boxed("ARG", format!(
+            "get: the index must be an int, got {}",
+            other.type_name()
+        ))),
+        (other, _) => Err(RtError::boxed("ARG", format!(
+            "get: expected a map, array or string, got {}",
             other.type_name()
         ))),
     }

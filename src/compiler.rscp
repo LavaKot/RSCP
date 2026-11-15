@@ -1397,6 +1397,27 @@ impl Compiler {
 
     /// Compile `match value { arms }` as an expression: the result is left
     /// on the stack with no hidden slots underneath (see the body comment).
+
+/// Structural equality of variant-pattern fields (for alternations).
+fn same_fields(a: &[VariantField], b: &[VariantField]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(x, y)| match (x, y) {
+        (VariantField::Bind(p), VariantField::Bind(q)) => p == q,
+        (VariantField::Wild, VariantField::Wild) => true,
+        (VariantField::Lit(p), VariantField::Lit(q)) => match (p, q) {
+            (Pattern::Int(u), Pattern::Int(v)) => u == v,
+            (Pattern::Float(u), Pattern::Float(v)) => u == v,
+            (Pattern::Str(u), Pattern::Str(v)) => u == v,
+            (Pattern::Bool(u), Pattern::Bool(v)) => u == v,
+            (Pattern::Null, Pattern::Null) => true,
+            _ => false,
+        },
+        _ => false,
+    })
+}
+
     fn compile_match(
         &mut self,
         value: &Expr,
@@ -1527,35 +1548,39 @@ impl Compiler {
                 self.declare_local(name, false, line, col)?;
             }
             // Enum-variant payload bindings (26.0.11.0): create a cell per
-            // binding, then fill it from the variant's args.
-            if let Pattern::EnumVariant { bindings, .. } = &arm.patterns[0] {
-                for (i, b) in bindings.iter().enumerate() {
-                    self.emit(Op::Null, line, col);
-                    self.push_temp();
-                    let slot = self.declare_local(b, false, line, col)?;
-                    self.cur().proto.chunk.emit_op_u8_u8_u8(
-                        Op::EnumBind,
-                        m_slot,
-                        i as u8,
-                        slot,
-                        line,
-                        col,
-                    );
+            // binding, then fill it from the variant's args. Only `Bind`
+            // fields bind; literals and `_` are checked in the test phase
+            // (26.0.12.0).
+            if let Pattern::EnumVariant { fields, .. } = &arm.patterns[0] {
+                for (i, f) in fields.iter().enumerate() {
+                    if let VariantField::Bind(b) = f {
+                        self.emit(Op::Null, line, col);
+                        self.push_temp();
+                        let slot = self.declare_local(b, false, line, col)?;
+                        self.cur().proto.chunk.emit_op_u8_u8_u8(
+                            Op::EnumBind,
+                            m_slot,
+                            i as u8,
+                            slot,
+                            line,
+                            col,
+                        );
+                    }
                 }
             }
-            // Alternations must agree on the bound names.
-            let enum_binds: Vec<&Vec<String>> = arm
+            // Alternations must agree on the fields they specify.
+            let enum_fields: Vec<&Vec<VariantField>> = arm
                 .patterns
                 .iter()
                 .filter_map(|p| match p {
-                    Pattern::EnumVariant { bindings, .. } => Some(bindings),
+                    Pattern::EnumVariant { fields, .. } => Some(fields),
                     _ => None,
                 })
                 .collect();
-            if let Some(first) = enum_binds.first() {
-                if enum_binds.iter().any(|b| *b != *first) {
+            if let Some(first) = enum_fields.first() {
+                if enum_fields.iter().any(|b| !Self::same_fields(b, first)) {
                     return Err(self.err(
-                        "alternation patterns must bind the same names",
+                        "alternation patterns must match and bind the same payload elements",
                         line,
                         col,
                     ));
@@ -1696,9 +1721,10 @@ impl Compiler {
                 self.emit(if *inclusive { Op::Le } else { Op::Less }, line, col);
                 self.patch_jump(jf, line, col)?;
             }
-            Pattern::EnumVariant { enum_name, variant, bindings } => {
+            Pattern::EnumVariant { enum_name, variant, fields } => {
                 // Validate against the same-file declaration, then one
-                // fused instruction decides the match (26.0.11.0).
+                // fused instruction decides the variant, and literal
+                // fields each get their own comparison (26.0.12.0).
                 let found = self
                     .enums
                     .get(enum_name)
@@ -1715,11 +1741,11 @@ impl Compiler {
                         return Err(self.err(msg, line, col));
                     }
                     Some(arity) => {
-                        if !bindings.is_empty() && bindings.len() != arity {
+                        if !fields.is_empty() && fields.len() != arity {
                             return Err(self.err(
                                 format!(
-                                    "pattern '{enum_name}.{variant}' expects {arity} binding(s), got {}",
-                                    bindings.len()
+                                    "pattern '{enum_name}.{variant}' has {arity} payload element(s), got {}",
+                                    fields.len()
                                 ),
                                 line,
                                 col,
@@ -1733,6 +1759,61 @@ impl Compiler {
                     .proto
                     .chunk
                     .emit_op_u8_u16_u16(Op::EnumIs, m_slot, e_ci, v_ci, line, col);
+                let mut jf_later: Vec<usize> = Vec::new();
+                // Literal payload elements: `Ast.Bin("+", l, r)`. Each
+                // check chains through the peek-jump shape (like range
+                // patterns), leaving exactly one bool on the stack.
+                let lits: Vec<usize> = fields
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, f)| match f {
+                        VariantField::Lit(_) => Some(i),
+                        _ => None,
+                    })
+                    .collect();
+                if !lits.is_empty() {
+                    // The variant test's bool opens the chain.
+                    let jf = self.emit_jump(Op::JumpIfFalsePeek, line, col)?;
+                    self.emit(Op::Pop, line, col);
+                    jf_later.push(jf);
+                }
+                for (k, &i) in lits.iter().enumerate() {
+                    let p = match &fields[i] {
+                        VariantField::Lit(p) => p,
+                        _ => unreachable!(),
+                    };
+                    let lit = match p {
+                        Pattern::Int(v) => Value::Int(*v),
+                        Pattern::Float(v) => Value::Float(*v),
+                        Pattern::Str(v) => Value::str(v.clone()),
+                        Pattern::Bool(b) => Value::Bool(*b),
+                        Pattern::Null => Value::Null,
+                        _ => {
+                            return Err(self.err(
+                                "only literal payload patterns are supported here",
+                                line,
+                                col,
+                            ));
+                        }
+                    };
+                    let k_ci = self.constant(lit, line, col)?;
+                    self.cur().proto.chunk.emit_op_u8_u8_u16(
+                        Op::ArgsIs,
+                        m_slot,
+                        i as u8,
+                        k_ci,
+                        line,
+                        col,
+                    );
+                    if k + 1 < lits.len() {
+                        let jf = self.emit_jump(Op::JumpIfFalsePeek, line, col)?;
+                        self.emit(Op::Pop, line, col); // true: check the next literal
+                        jf_later.push(jf);
+                    }
+                }
+                for j in jf_later.drain(..) {
+                    self.patch_jump(j, line, col)?;
+                }
             }
             Pattern::Binding(_) | Pattern::Wildcard => {}
         }

@@ -128,9 +128,12 @@ pub enum Op {
     /// stack[base + u8(dst)] = local(u8).args[u8] — destructure an enum
     /// variant payload into a binding (26.0.11.0)
     EnumBind,
+    /// push Bool: does local(u8).args[u8] equal consts[u16]? (literal
+    /// elements of variant patterns, 26.0.12.0)
+    ArgsIs,
 }
 
-const ALL_OPS: [Op; 64] = [
+const ALL_OPS: [Op; 65] = [
     Op::Constant,
     Op::Null,
     Op::True,
@@ -195,6 +198,7 @@ const ALL_OPS: [Op; 64] = [
     Op::ForArray,
     Op::EnumIs,
     Op::EnumBind,
+    Op::ArgsIs,
 ];
 
 impl Op {
@@ -268,6 +272,7 @@ impl Op {
             Op::ForArray => "ForArray",
             Op::EnumIs => "EnumIs",
             Op::EnumBind => "EnumBind",
+            Op::ArgsIs => "ArgsIs",
         }
     }
 
@@ -297,6 +302,7 @@ impl Op {
             Op::ForRangeExcl | Op::ForRangeIncl | Op::ForArray => Operand::U8U8U8U16,
             Op::EnumIs => Operand::U8U16U16,
             Op::EnumBind => Operand::U8U8U8,
+            Op::ArgsIs => Operand::U8U8U16,
             _ => Operand::None,
         }
     }
@@ -316,6 +322,8 @@ pub enum Operand {
     U8U16U16,
     /// u8 slot, u8 index, u8 slot
     U8U8U8,
+    /// u8 slot, u8 index, u16 const index
+    U8U8U16,
 }
 
 
@@ -412,6 +420,20 @@ impl Chunk {
         self.code.push((c & 0xff) as u8);
         self.code.push((c >> 8) as u8);
         self.at(line, col);
+        self.at(line, col);
+        self.at(line, col);
+        self.at(line, col);
+        self.at(line, col);
+        i
+    }
+
+    /// Emit an opcode with a u8, a u8 and a u16 (little-endian).
+    pub fn emit_op_u8_u8_u16(&mut self, op: Op, a: u8, b: u8, c: u16, line: usize, col: usize) -> usize {
+        let i = self.emit(op, line, col);
+        self.code.push(a);
+        self.code.push(b);
+        self.code.push((c & 0xff) as u8);
+        self.code.push((c >> 8) as u8);
         self.at(line, col);
         self.at(line, col);
         self.at(line, col);
@@ -601,6 +623,15 @@ fn disasm_one(p: &FnProto, out: &mut String) {
                 let (a, b, c) = (chunk.code[ip], chunk.code[ip + 1], chunk.code[ip + 2]);
                 ip += 3;
                 text.push_str(&format!(" {a} {b} {c}"));
+            }
+            Operand::U8U8U16 => {
+                let (a, b) = (chunk.code[ip], chunk.code[ip + 1]);
+                let c = u16::from(chunk.code[ip + 2]) | (u16::from(chunk.code[ip + 3]) << 8);
+                ip += 4;
+                text.push_str(&format!(" {a} {b} {c}"));
+                if let Some(Value::Str(k)) = chunk.consts.get(c as usize) {
+                    text.push_str(&format!("        ; == {k:?}"));
+                }
             }
         }
         if op == Op::Closure {

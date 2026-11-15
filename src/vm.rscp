@@ -579,6 +579,28 @@ impl Vm {
                         };
                         self.stack.push(Value::Bool(hit));
                     }
+                    Op::ArgsIs => {
+                        // push Bool: does local(m).args[arg] equal consts[k]?
+                        let m_slot = chunk.code[ip] as usize;
+                        let arg_idx = chunk.code[ip + 1] as usize;
+                        ip += 2;
+                        let k_ci = read_u16(chunk, &mut ip);
+                        let lit = chunk.consts[k_ci as usize].clone();
+                        let hit = match &self.stack[base + m_slot] {
+                            Value::Map(m) => {
+                                let mref = m.borrow();
+                                match mref.get("args") {
+                                    Some(Value::Array(items)) => {
+                                        let items = items.borrow();
+                                        items.get(arg_idx).map_or(false, |v| v.equals(&lit))
+                                    }
+                                    _ => false,
+                                }
+                            }
+                            _ => false,
+                        };
+                        self.stack.push(Value::Bool(hit));
+                    }
                     Op::EnumBind => {
                         // stack[base + dst] = local(m).args[arg_idx]
                         let m_slot = chunk.code[ip] as usize;

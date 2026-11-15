@@ -1,0 +1,37 @@
+# get(m, k, default?) — Option-style access (26.0.12.0): missing members
+# return the default instead of raising, wrong container types still do.
+
+var m = {"a": 1, "b": null}
+println(get(m, "a"), get(m, "b"), get(m, "c"))
+println(get(m, "c", 0), get(m, "c", "missing"))
+
+var arr = [10, 20, 30]
+println(get(arr, 0), get(arr, -1), get(arr, 99), get(arr, 99, -1))
+
+println(get("hello", 0), get("hello", -1), get("hello", 99, "?"))
+
+# The option-flow idiom this replaces: has() + index vs one get().
+fn old_way(k) -> has(m, k) ? m[k] : "none"
+fn new_way(k) -> get(m, k, "none")
+println(old_way("a"), old_way("z"), new_way("a"), new_way("z"))
+
+# get composes with typed errors: safe parse with a typed fallback.
+fn parse_int(s) {
+    try { return int(s) }
+    catch e code "CONVERT" { return get(m, "fallback", 0) }
+}
+println(parse_int("42"), parse_int("oops"))
+
+# Wrong types still error (with a code).
+var codes = []
+try { get(5, "k") } catch e { push(codes, e.code) }
+try { get(m, 5) } catch e { push(codes, e.code) }
+try { get(arr, "k") } catch e { push(codes, e.code) }
+try { get() } catch e { push(codes, e.code) }
+println(join(codes, " "))
+
+# Enumerating without fear of a missing key.
+var env = {"home": "/home/z", "shell": "/bin/rscp"}
+for k in ["home", "shell", "user", "path"] {
+    println(k, "=", get(env, k, "<unset>"))
+}

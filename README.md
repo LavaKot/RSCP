@@ -154,7 +154,7 @@ A REPL taste:
 
 ```
 $ rscp repl
-rscp 26.0.11.0 — enter statements, Ctrl-D to exit.
+rscp 26.0.12.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -170,7 +170,7 @@ nothing.
 RSCP is portable: the whole implementation is plain Rust + `std`, so the
 same source builds natively on Windows, Linux and macOS. Editor support
 ships in [`editors/`](editors/README.md): a real VS Code extension
-(`code --install-extension editors/vscode/rscp-26.0.11.0.vsix`), Vim,
+(`code --install-extension editors/vscode/rscp-26.0.12.0.vsix`), Vim,
 Sublime Text, Notepad++, and a Windows Explorer file association.
 
 ---
@@ -295,28 +295,40 @@ and stderr pinned), and the CLI surface itself. The 12 showcase examples in
 
 RSCP versions are four numbers: **`YY.0.MINOR.PATCH`** (until 26.0.7.0 the
 scheme was `YEAR.MAJOR.MINOR.PATCH` — `2026.6.0.0` — and the minor counter
-carries over; this is feature release #11).
+carries over; this is feature release #12).
 
 | Number | Counts what | Example |
 |--------|-------------|---------|
 | 1st | year, short form (26 = 2026) | `26` |
 | 2nd | `0` while RSCP is in beta, `1` from the first stable release | `0` |
-| 3rd | feature releases — one number per shipped feature set | `11` |
+| 3rd | feature releases — one number per shipped feature set | `12` |
 | 4th | patches (fixes) within a feature release | `0` |
 
-So this release is `26.0.10.0` (`v26.0.11.0`); a hotfix on top of it would
+So this release is `26.0.10.0` (`v26.0.12.0`); a hotfix on top of it would
 be `26.0.10.1`, and the next feature release `26.0.11.0`. While the second
 number is `0`, GitHub releases are titled **"Beta …"** (e.g. "Beta
 26.0.10.0"); from the first stable release the prefix disappears.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`26.0.11` in this release). The full four-number version lives in
+(`26.0.12` in this release). The full four-number version lives in
 `rscp version`, the REPL banner, release tags, release file names and this
 README.
 
 ## Changelog
 
+* **26.0.12.0** — get(), literal payload patterns, and the calculator
+  example. `get(m, k, default?)` is the Option-style read: the value or the
+  default (null) when the key is missing — maps, arrays and strings,
+  negative indexes from the end; only wrong container types raise (`ARG`).
+  Enum-variant patterns now accept **literal payload elements** —
+  `Ast.Bin("+", l, r)` matches only the `+` case — plus `_` and bindings,
+  via a new fused `ArgsIs` opcode (65 total); alternations must agree on
+  fields. `examples/calc.rscp` is a full expression calculator (tokenizer →
+  enum AST → evaluator) showcasing enums, exhaustiveness, typed errors and
+  selective catch. The docs gained a "Honest limits" section. 69 unit
+  tests, 112 golden cases.
+* **26.0.11.0** — enum sum types with compile-time exhaustiveness.
 * **26.0.11.0** — enum sum types with compile-time exhaustiveness.
   `enum Shape { Circle, Rect(w, h), Point }`: unit variants are values,
   tuple variants are constructor functions; `match` destructures payloads

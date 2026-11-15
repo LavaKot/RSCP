@@ -111,12 +111,24 @@ pub enum Pattern {
     /// `_` or `else`: matches anything.
     Wildcard,
     /// `Shape.Circle` / `Shape.Rect(w, h)` — an enum-variant pattern
-    /// (26.0.11.0). `bindings` names the payload args for tuple variants.
+    /// (26.0.11.0). Payload elements may be literals, bindings or `_`
+    /// (26.0.12.0): `Ast.Bin("+", l, r)`.
     EnumVariant {
         enum_name: String,
         variant: String,
-        bindings: Vec<String>,
+        fields: Vec<VariantField>,
     },
+}
+
+/// One element inside an enum-variant pattern's parentheses.
+#[derive(Debug, Clone)]
+pub enum VariantField {
+    /// A literal to compare the payload element with.
+    Lit(Pattern),
+    /// Bind the payload element to a name.
+    Bind(String),
+    /// Ignore the payload element (`_`).
+    Wild,
 }
 
 /// The body of a `match` arm: an expression, or a block whose last

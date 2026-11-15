@@ -1,0 +1,169 @@
+# A small expression calculator: tokenizer -> enum AST -> evaluator,
+# with typed errors and selective catch (the 26.0.10-26.0.12 stack in
+# one file). Supports + - * / % ** ( ), unary -, integers and floats.
+
+# ---- the AST as a sum type ------------------------------------------------
+
+enum Ast {
+    Num(v),
+    Neg(inner),
+    Bin(op, lhs, rhs)
+}
+
+# ---- the errors this calculator can raise ---------------------------------
+# throw error("CALC_*", ...) — codes travel through catch unchanged.
+
+fn err_div(line)  { return error("CALC_DIV", "division by zero", {"line": line}) }
+fn err_parse(msg, line) { return error("CALC_PARSE", msg, {"line": line}) }
+
+# ---- tokenizer ------------------------------------------------------------
+
+fn is_digit(c) -> match c { "0" => true, "1" => true, "2" => true, "3" => true,
+    "4" => true, "5" => true, "6" => true, "7" => true, "8" => true, "9" => true,
+    else => false }
+
+fn tokenize(src) {
+    var toks = []
+    var i = 0
+    var n = len(src)
+    while i < n {
+        let c = src[i]
+        if c == " " { i += 1 ; continue }
+        if is_digit(c) or (c == "." and i + 1 < n and is_digit(src[i + 1])) {
+            var j = i
+            var dots = 0
+            while j < n and (is_digit(src[j]) or src[j] == ".") {
+                if src[j] == "." { dots += 1 }
+                j += 1
+            }
+            if dots > 1 { throw err_parse(f"bad number at column {i + 1}", i + 1) }
+            push(toks, {"t": "num", "v": slice(src, i, j)})
+            i = j
+            continue
+        }
+        let two = i + 1 < n ? slice(src, i, i + 2) : ""
+        if two == "**" { push(toks, {"t": "**"}) ; i += 2 ; continue }
+        if match c { "+" => true, "-" => true, "*" => true, "/" => true,
+                     "%" => true, "(" => true, ")" => true, else => false } {
+            push(toks, {"t": c})
+            i += 1
+            continue
+        }
+        throw err_parse(f"unexpected character '{c}' at column {i + 1}", i + 1)
+    }
+    return toks
+}
+
+# ---- recursive-descent parser: expr -> term -> factor -> power -> atom -----
+
+var toks = []
+var pos = 0
+
+fn peek() -> pos < len(toks) ? get(toks[pos], "t", "") : ""
+
+fn eat(t, line) {
+    if peek() != t { throw err_parse(f"expected '{t}' at token {pos + 1}", line) }
+    pos += 1
+}
+
+fn expr() {
+        var node = term()
+        while peek() == "+" or peek() == "-" {
+            let op = toks[pos]["t"]
+            pos += 1
+            node = Ast.Bin(op, node, term())
+        }
+        return node
+    }
+    fn term() {
+        var node = power()
+        while peek() == "*" or peek() == "/" or peek() == "%" {
+            let op = toks[pos]["t"]
+            pos += 1
+            node = Ast.Bin(op, node, power())
+        }
+        return node
+    }
+    fn power() {
+        var base = atom()
+        if peek() == "**" {
+            pos += 1
+            return Ast.Bin("**", base, power())
+        }
+        return base
+    }
+    fn atom() {
+        if peek() == "num" {
+            let text = toks[pos]["v"]
+            pos += 1
+            return Ast.Num(contains(text, ".") ? float(text) : int(text))
+        }
+        if peek() == "-" {
+            pos += 1
+            return Ast.Neg(atom())
+        }
+    if peek() == "(" {
+        pos += 1
+        let inner = expr()
+        eat(")", 0)
+        return inner
+    }
+    throw err_parse(f"expected a number, '(' or unary '-', found '{peek()}'", pos + 1)
+}
+
+fn parse(src) {
+    toks = tokenize(src)
+    pos = 0
+    let ast = expr()
+    if pos != len(toks) { throw err_parse(f"unexpected '{peek()}' after the expression", pos + 1) }
+    return ast
+}
+
+# ---- evaluator: match destructures the enum, exhaustiveness is checked ----
+
+fn eval(node) -> match node {
+    Ast.Num(v) => v
+    Ast.Neg(inner) => -eval(inner)
+    Ast.Bin("+", l, r) => eval(l) + eval(r)
+    Ast.Bin("-", l, r) => eval(l) - eval(r)
+    Ast.Bin("*", l, r) => eval(l) * eval(r)
+    Ast.Bin("**", l, r) => eval(l) ** eval(r)
+    Ast.Bin("/", l, r) => {
+        let d = eval(r)
+        if d == 0 { throw err_div(0) }
+        eval(l) / d
+    }
+    Ast.Bin("%", l, r) => {
+        let d = eval(r)
+        if d == 0 { throw err_div(0) }
+        eval(l) % d
+    }
+}
+
+# ---- a REPL over argv-free demo input, with selective catch ----------------
+
+fn calc(src) {
+    try {
+        let ast = parse(src)
+        return f"= {eval(ast)}"
+    }
+    catch e code "CALC_DIV" { return f"cannot divide by zero (column {get(e.detail, "line", 0)})" }
+    catch e code "CALC_PARSE" { return f"syntax: {e.message} (column {get(e.detail, "line", 0)})" }
+    catch e code "INT_OVERFLOW" { return "number too large" }
+}
+
+for line in [
+    "1 + 2 * 3",
+    "(1 + 2) * 3",
+    "2 ** 10",
+    "7 / 2",
+    "7.0 / 2",
+    "-(3 + 4)",
+    "1..5",
+    "1 + * 2",
+    "1 / 0",
+    "10 % 0",
+    "9223372036854775807 + 1",
+] {
+    println(line, "=>", calc(line))
+}
