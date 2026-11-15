@@ -44,7 +44,7 @@ try { nope() } catch e { push(codes, e.code) }
 try { len(5) } catch e { push(codes, e.code) }
 try { assert(false) } catch e { push(codes, e.code) }
 try { panic("p") } catch e { push(codes, e.code) }
-try { match 99 { 1 => "one" } } catch e { push(codes, e.code) }
+try { throw error("NO_ARM", "simulated: match misses are compile errors now") } catch e { push(codes, e.code) }
 try { throw "user string" } catch e { push(codes, e.code) }
 try { throw {"code": "MY_CODE", "message": "custom map throw"} } catch e { push(codes, e.code + "/" + str(e.message)) }
 try { throw error("BUILT", "via error()", {"n": 7}) } catch e { push(codes, e.code + "/" + str(e.detail.n)) }

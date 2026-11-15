@@ -2121,7 +2121,6 @@ mod tests {
             ("fn f(a, b) { return a; } f(1);", "ARITY"),
             ("let x = 1 + true;", "TYPE"),
             ("throw \"boom\";", "USER"),
-            ("match 99 { 1 => 2 };", "NO_ARM"),
         ];
         for (src, code) in cases {
             let err = match run(src) {
@@ -2381,7 +2380,9 @@ mod tests {
     #[test]
     fn match_runtime_errors() {
         for (src, needle) in [
-            ("var x = match 5 { 1 => \"one\", 2 => \"two\" };", "no arm matched"),
+            // A catch-all-less literal match is a compile error (26.0.12.8);
+            // the runtime raise stays as a safety net.
+            ("var x = match 5 { 1 => \"one\", 2 => \"two\" };", "not exhaustive"),
             ("var x = match 1.5 { 1 => \"one\", else => \"x\" };", ""), // int/float equality
         ] {
             if needle.is_empty() {

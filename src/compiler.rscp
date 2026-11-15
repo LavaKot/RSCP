@@ -1592,6 +1592,17 @@ fn same_fields(a: &[VariantField], b: &[VariantField]) -> bool {
                 }
             }
         }
+        if enum_name.is_none() && !has_catchall {
+            // A literal/range match without a catch-all can only fail at
+            // runtime ("no arm matched"); that is a compile error now
+            // (26.0.12.8), like Rust's non-exhaustive patterns.
+            return Err(self.err(
+                "match is not exhaustive: add an 'else' arm (or a binding pattern) \
+                 so every value is covered",
+                line,
+                col,
+            ));
+        }
         if let Some(en) = enum_name {
             if !has_catchall {
                 match self.enums.get(en) {

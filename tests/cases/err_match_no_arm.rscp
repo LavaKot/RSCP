@@ -1,3 +1,4 @@
-# No arm matches and there is no catch-all -> runtime error.
+# A literal match without a catch-all is a compile error (26.0.12.8),
+# like Rust non-exhaustive patterns; it used to fail at runtime.
 let x = match 5 { 1 => "one", 2 => "two" }
 println(x)
