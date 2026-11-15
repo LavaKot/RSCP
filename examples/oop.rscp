@@ -1,0 +1,23 @@
+# Classes with inheritance (2026.6.0): init, self, super, instanceof.
+class Shape {
+    fn init(name) { self.name = name }
+    fn area() -> 0
+    fn describe() -> f"{self.name} with area {self.area()}"
+}
+class Circle(Shape) {
+    fn init(r) {
+        super.init("circle")
+        self.r = r
+    }
+    fn area() -> 3 * self.r * self.r
+}
+class Square(Shape) {
+    fn init(a) {
+        super.init("square")
+        self.a = a
+    }
+    fn area() -> self.a * self.a
+}
+let shapes = [Circle(2), Square(3)]
+for s in shapes { println(s.describe()) }
+println(shapes[0] instanceof Shape, shapes[1] instanceof Circle)

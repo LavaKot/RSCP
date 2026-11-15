@@ -31,6 +31,8 @@ pub enum BinaryOp {
     Le,
     Gt,
     Ge,
+    /// a instanceof B — instance-of test against a class
+    InstanceOf,
 }
 
 /// Logical operators (short-circuiting).
@@ -172,6 +174,8 @@ pub enum ExprKind {
     Array(Vec<Expr>),
     Map(Vec<(Expr, Expr)>),
     Func(Box<FuncLit>),
+    /// super.name — only valid as the callee of a call (inside a method).
+    Super(String),
 }
 
 impl Expr {
@@ -218,6 +222,13 @@ pub enum StmtKind {
     },
     /// Named function declaration: `fn name(p1, p2) { ... }`.
     Fn { name: String, func: FuncLit },
+    /// `class Name(Parent) { fn method(...) { } ... }` (2026.6.0). Methods
+    /// never list `self`: the compiler injects it as parameter 0.
+    Class {
+        name: String,
+        parent: Option<String>,
+        methods: Vec<(String, FuncLit)>,
+    },
     /// `try { body } catch e { handler }` — runtime errors in `body` jump to
     /// `handler` with the message bound to `name` (or unnamed).
     Try {

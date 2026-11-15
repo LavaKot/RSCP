@@ -1,0 +1,17 @@
+# Classes: init, self, methods, inheritance, super, instanceof (2026.6.0)
+class Animal {
+    fn init(name) { self.name = name }
+    fn speak() -> "..."
+    fn describe() -> f"{self.name} says {self.speak()}"
+}
+class Dog(Animal) {
+    fn speak() -> "Woof"
+}
+class Puppy(Dog) {
+    fn speak() -> "yip " + super.speak()
+}
+let d = Dog("Rex")
+println(d.describe())
+println(d.name, d instanceof Dog, d instanceof Animal, d instanceof Puppy)
+println(Puppy("Bit").describe())
+println(type(d), d)

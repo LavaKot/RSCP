@@ -52,6 +52,10 @@ struct Frame {
     base: usize,
     /// Set while an imported module is running in this frame.
     module: Option<Box<ModuleCtx>>,
+    /// When set, the frame's return value is replaced by this value
+    /// (a constructor call returns the instance even when init returns
+    /// nothing).
+    ret_override: Option<Value>,
 }
 
 pub struct Vm {
@@ -142,7 +146,7 @@ impl Vm {
         self.handlers.clear();
         let func = Rc::new(FunctionVal { proto, upvalues: Vec::new() });
         self.stack.push(Value::Func(Rc::clone(&func)));
-        self.frames.push(Frame { func, ip: 0, base: 0, module: None });
+        self.frames.push(Frame { func, ip: 0, base: 0, module: None, ret_override: None });
         self.exec()
     }
 
@@ -418,9 +422,67 @@ impl Vm {
                                     ));
                                 }
                                 self.frames.last_mut().unwrap().ip = ip;
-                                self.frames.push(Frame { func: Rc::clone(&f), ip: 0, base: callee_pos, module: None });
+                                self.frames.push(Frame { func: Rc::clone(&f), ip: 0, base: callee_pos, module: None, ret_override: None });
                                 continue 'outer;
                             }
+                        Value::Map(ref m)
+                            if m
+                                .borrow()
+                                .get("__isclass__")
+                                .map_or(false, |f| matches!(f, Value::Bool(true))) =>
+                        {
+                            // Calling a class constructs an instance: a map
+                            // {"__class__": class}; init (if any) runs with
+                            // the instance as self, and the instance is the
+                            // value of the whole call.
+                            let args: Vec<Value> =
+                                self.stack.drain(callee_pos + 1..).collect();
+                            self.stack.truncate(callee_pos);
+                            let class = Value::Map(Rc::clone(m));
+                            let instance = Value::Map(Rc::new(RefCell::new(
+                                [("__class__".to_string(), class.clone())]
+                                    .into_iter()
+                                    .collect(),
+                            )));
+                            match find_method(&class, "init") {
+                                Some(init) => {
+                                    if init.proto.arity as usize != args.len() + 1 {
+                                        rt!(op_ip, format!(
+                                            "init of class '{}' expects {} argument(s), got {}",
+                                            class_name(&class),
+                                            init.proto.arity - 1,
+                                            args.len()
+                                        ));
+                                    }
+                                    if self.frames.len() >= MAX_FRAMES {
+                                        rt_fatal!(op_ip, format!(
+                                            "stack overflow: call depth exceeded {MAX_FRAMES} frames"
+                                        ));
+                                    }
+                                    self.frames.last_mut().unwrap().ip = ip;
+                                    self.stack.push(Value::Func(Rc::clone(&init)));
+                                    self.stack.push(instance.clone());
+                                    self.stack.extend(args);
+                                    self.frames.push(Frame {
+                                        func: init,
+                                        ip: 0,
+                                        base: callee_pos,
+                                        module: None,
+                                        ret_override: Some(instance),
+                                    });
+                                    continue 'outer;
+                                }
+                                None => {
+                                    if !args.is_empty() {
+                                        rt!(op_ip, format!(
+                                            "class '{}' has no init and takes no arguments",
+                                            class_name(&class)
+                                        ));
+                                    }
+                                    self.stack.push(instance);
+                                }
+                            }
+                        }
                             other => rt!(op_ip, format!(
                                 "only functions can be called, got {}",
                                 other.type_name()
@@ -451,7 +513,7 @@ impl Vm {
                     }
                     Op::Return => {
                         let result = self.stack.pop();
-                        let frame = self.frames.pop().unwrap();
+                        let mut frame = self.frames.pop().unwrap();
                         let frame_base = frame.base;
                         self.close_upvalues_ge(frame_base);
                         self.stack.truncate(frame_base);
@@ -480,6 +542,9 @@ impl Vm {
                             }
                             None => result.unwrap_or(Value::Null),
                         };
+                        // A constructor call returns the instance even when
+                        // init returns nothing.
+                        let value = frame.ret_override.take().unwrap_or(value);
                         if self.frames.is_empty() {
                             return Ok(());
                         }
@@ -534,6 +599,130 @@ impl Vm {
                             Ok(()) => {}
                             Err(msg) => rt!(op_ip, msg),
                         }
+                    }
+                    Op::CallMethod => {
+                        // obj.key(args): an own field holding a function is
+                        // called unbound; an instance's method is looked up
+                        // the class chain and called with self bound.
+                        let argc = chunk.code[ip] as usize;
+                        ip += 1;
+                        if self.stack.len() < argc + 2 {
+                            rt_fatal!(op_ip, "internal error: stack underflow in CallMethod");
+                        }
+                        let obj_pos = self.stack.len() - argc - 2;
+                        let obj = self.stack[obj_pos].clone();
+                        let key = match &self.stack[obj_pos + 1] {
+                            Value::Str(k) => k.to_string(),
+                            _ => rt_fatal!(op_ip, "internal error: method name must be a string"),
+                        };
+                        let (f, bound_self) = match &obj {
+                            Value::Map(m) => {
+                                let mref = m.borrow();
+                                if let Some(v) = mref.get(&key) {
+                                    match v {
+                                        Value::Func(f) => (Rc::clone(f), None),
+                                        other => rt!(op_ip, format!(
+                                            "property '{key}' of a {} is not a function",
+                                            other.type_name()
+                                        )),
+                                    }
+                                } else if let Some(Value::Map(class)) = mref.get("__class__") {
+                                    let class = Value::Map(Rc::clone(class));
+                                    match find_method(&class, &key) {
+                                        Some(f) => (f, Some(obj.clone())),
+                                        None => rt!(op_ip, format!(
+                                            "unknown method '{key}' in class '{}'",
+                                            class_name(&class)
+                                        )),
+                                    }
+                                } else {
+                                    rt!(op_ip, format!("unknown method or field '{key}'"))
+                                }
+                            }
+                            other => rt!(op_ip, format!(
+                                "cannot call methods on {}",
+                                other.type_name()
+                            )),
+                        };
+                        let self_extra = if bound_self.is_some() { 1 } else { 0 };
+                        if f.proto.arity as usize != argc + self_extra {
+                            rt!(op_ip, format!(
+                                "method '{key}' expects {} argument(s), got {}",
+                                f.proto.arity as usize - self_extra,
+                                argc
+                            ));
+                        }
+                        if self.frames.len() >= MAX_FRAMES {
+                            rt_fatal!(op_ip, format!(
+                                "stack overflow: call depth exceeded {MAX_FRAMES} frames"
+                            ));
+                        }
+                        self.frames.last_mut().unwrap().ip = ip;
+                        let args: Vec<Value> = self.stack.drain(obj_pos + 2..).collect();
+                        self.stack.truncate(obj_pos);
+                        self.stack.push(Value::Func(Rc::clone(&f)));
+                        if let Some(inst) = bound_self {
+                            self.stack.push(inst);
+                        }
+                        self.stack.extend(args);
+                        self.frames.push(Frame {
+                            func: f,
+                            ip: 0,
+                            base: obj_pos,
+                            module: None,
+                            ret_override: None,
+                        });
+                        continue 'outer;
+                    }
+                    Op::SuperMethod => {
+                        // Push the parent class's method for super.name(...);
+                        // self is local slot 0 of the enclosing method frame.
+                        let ni = read_u16(chunk, &mut ip);
+                        let name = match &chunk.consts[ni as usize] {
+                            Value::Str(s) => s.to_string(),
+                            _ => rt_fatal!(op_ip, "internal error: SuperMethod name"),
+                        };
+                        let base = self.frames.last().unwrap().base;
+                        let this = self.stack[base + 1].clone();
+                        let parent = match &this {
+                            Value::Map(m) => {
+                                let class = m.borrow().get("__class__").and_then(|c| match c {
+                                    Value::Map(cm) => Some(Rc::clone(cm)),
+                                    _ => None,
+                                });
+                                match class {
+                                    Some(cm) => {
+                                        let parent = cm.borrow().get("__parent__").cloned();
+                                        match parent {
+                                            Some(p @ Value::Map(_)) => p,
+                                            _ => rt!(op_ip, format!(
+                                                "super: class '{}' has no parent",
+                                                class_name(&Value::Map(cm))
+                                            )),
+                                        }
+                                    }
+                                    None => rt!(op_ip, "super can only be used inside a method"),
+                                }
+                            }
+                            _ => rt!(op_ip, "super can only be used inside a method"),
+                        };
+                        match find_method(&parent, &name) {
+                            Some(f) => self.stack.push(Value::Func(f)),
+                            None => rt!(op_ip, format!("super: unknown method '{name}'")),
+                        }
+                    }
+                    Op::InstanceOf => {
+                        let rhs = self.stack.pop().unwrap();
+                        let lhs = self.stack.pop().unwrap();
+                        let hit = match (&lhs, &rhs) {
+                            (Value::Map(inst), Value::Map(_)) => inst
+                                .borrow()
+                                .get("__class__")
+                                .and_then(|c| class_chain_has(c, &rhs))
+                                .unwrap_or(false),
+                            _ => false,
+                        };
+                        self.stack.push(Value::Bool(hit));
                     }
                     Op::SliceGet => {
                         let step = self.stack.pop().unwrap();
@@ -657,6 +846,7 @@ impl Vm {
                                 ip: 0,
                                 base: base2,
                                 module: Some(Box::new(ModuleCtx { path, saved_globals })),
+                                ret_override: None,
                             });
                             continue 'outer;
                         }
@@ -1042,6 +1232,71 @@ fn slice_get(obj: Value, start: Value, end: Value, step: Value) -> Result<Value,
         }
         o => Err(format!("cannot slice {}", o.type_name())),
     }
+}
+
+
+/// True for class objects — maps carrying "__isclass__": true.
+#[allow(dead_code)]
+fn is_class(v: &Value) -> bool {
+    match v {
+        Value::Map(m) => m
+            .borrow()
+            .get("__isclass__")
+            .map_or(false, |f| matches!(f, Value::Bool(true))),
+        _ => false,
+    }
+}
+
+/// The "__name__" of a class map ("?" when absent).
+fn class_name(class: &Value) -> String {
+    match class {
+        Value::Map(m) => m.borrow().get("__name__").map_or_else(
+            || "?".to_string(),
+            |v| match v {
+                Value::Str(s) => s.to_string(),
+                _ => "?".to_string(),
+            },
+        ),
+        _ => "?".to_string(),
+    }
+}
+
+/// Find a method by name in a class chain (depth-capped against cycles).
+fn find_method(class: &Value, name: &str) -> Option<Rc<FunctionVal>> {
+    let mut cur = Some(class.clone());
+    for _ in 0..256 {
+        let c = cur?;
+        if let Value::Map(m) = &c {
+            let mref = m.borrow();
+            if let Some(v) = mref.get(name) {
+                return match v {
+                    Value::Func(f) => Some(Rc::clone(f)),
+                    _ => None, // a non-function field shadows the name
+                };
+            }
+            cur = mref.get("__parent__").cloned();
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
+/// Does the class chain of `class` contain `target` (by identity)?
+fn class_chain_has(class: &Value, target: &Value) -> Option<bool> {
+    let mut cur = Some(class.clone());
+    for _ in 0..256 {
+        let c = cur?;
+        if let (Value::Map(a), Value::Map(b)) = (&c, target) {
+            if Rc::ptr_eq(a, b) {
+                return Some(true);
+            }
+            cur = a.borrow().get("__parent__").cloned();
+        } else {
+            return Some(false);
+        }
+    }
+    Some(false)
 }
 
 /// Build a runtime error with a stack trace. Assumes every frame's `ip`

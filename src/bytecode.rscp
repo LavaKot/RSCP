@@ -97,9 +97,16 @@ pub enum Op {
     /// pop (path, proto); push the module's export map — running the module
     /// in a fresh global scope on first import (VM caches it by path)
     Import,
+    /// obj.key(args): pop argc(u8) args, the key and obj; when obj is an
+    /// instance the method is called with self bound (2026.6.0)
+    CallMethod,
+    /// push the parent class's method consts[u16] (super.name(...))
+    SuperMethod,
+    /// a instanceof B
+    InstanceOf,
 }
 
-const ALL_OPS: [Op; 54] = [
+const ALL_OPS: [Op; 57] = [
     Op::Constant,
     Op::Null,
     Op::True,
@@ -154,6 +161,9 @@ const ALL_OPS: [Op; 54] = [
     Op::PopHandler,
     Op::Throw,
     Op::Import,
+    Op::CallMethod,
+    Op::SuperMethod,
+    Op::InstanceOf,
 ];
 
 impl Op {
@@ -217,6 +227,9 @@ impl Op {
             Op::PopHandler => "PopHandler",
             Op::Throw => "Throw",
             Op::Import => "Import",
+            Op::CallMethod => "CallMethod",
+            Op::SuperMethod => "SuperMethod",
+            Op::InstanceOf => "InstanceOf",
         }
     }
 
@@ -224,7 +237,7 @@ impl Op {
     pub fn operand(self) -> Operand {
         match self {
             Op::PopN | Op::PopNUnder | Op::StrJoin | Op::GetLocal | Op::SetLocal
-            | Op::GetUpvalue | Op::SetUpvalue | Op::Call => {
+            | Op::GetUpvalue | Op::SetUpvalue | Op::Call | Op::CallMethod => {
                 Operand::U8
             }
             Op::Constant
@@ -238,6 +251,7 @@ impl Op {
             | Op::Loop
             | Op::Closure
             | Op::TryCatch
+            | Op::SuperMethod
             | Op::Array
             | Op::Map => Operand::U16,
             _ => Operand::None,

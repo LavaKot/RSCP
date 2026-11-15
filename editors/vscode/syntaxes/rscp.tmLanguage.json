@@ -168,11 +168,11 @@
       "patterns": [
         {
           "name": "keyword.control.flow.rscp",
-          "match": "\\b(if|else|while|loop|for|in|match|try|catch|throw|import|as|return|break|continue)\\b"
+          "match": "\\b(if|else|while|loop|for|in|match|try|catch|throw|import|as|class|self|super|instanceof|return|break|continue)\\b"
         },
         {
           "name": "storage.type.rscp",
-          "match": "\\b(fn|let|var)\\b"
+          "match": "\\b(fn|let|var|class)\\b"
         },
         {
           "name": "constant.language.rscp",

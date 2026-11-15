@@ -105,6 +105,32 @@ impl Value {
                 format!("[{}]", parts.join(", "))
             }
             Value::Map(m) => {
+                // Classes and instances print compactly (2026.6.0).
+                {
+                    let mref = m.borrow();
+                    if let Some(Value::Map(class)) = mref.get("__class__") {
+                        let name = class
+                            .borrow()
+                            .get("__name__")
+                            .map_or("?".to_string(), |v| match v {
+                                Value::Str(s) => s.to_string(),
+                                _ => "?".to_string(),
+                            });
+                        return format!("<{name} instance>");
+                    }
+                    if mref
+                        .get("__isclass__")
+                        .map_or(false, |f| matches!(f, Value::Bool(true)))
+                    {
+                        let name = mref
+                            .get("__name__")
+                            .map_or("?".to_string(), |v| match v {
+                                Value::Str(s) => s.to_string(),
+                                _ => "?".to_string(),
+                            });
+                        return format!("<class {name}>");
+                    }
+                }
                 let borrowed = m.borrow();
                 let mut keys: Vec<&String> = borrowed.keys().collect();
                 keys.sort();

@@ -137,6 +137,26 @@ fn n_float(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
 
 fn n_type(_vm: &mut Vm, args: Vec<Value>) -> Result<Value, String> {
     let v = one_arg("type", &args)?;
+    // Instances report their class name; classes report "class" (2026.6.0).
+    if let Value::Map(m) = &v {
+        let mref = m.borrow();
+        if let Some(Value::Map(class)) = mref.get("__class__") {
+            let name = class
+                .borrow()
+                .get("__name__")
+                .map_or("map".to_string(), |n| match n {
+                    Value::Str(s) => s.to_string(),
+                    _ => "map".to_string(),
+                });
+            return Ok(Value::str(name));
+        }
+        if mref
+            .get("__isclass__")
+            .map_or(false, |f| matches!(f, Value::Bool(true)))
+        {
+            return Ok(Value::str("class"));
+        }
+    }
     Ok(Value::str(v.type_name()))
 }
 

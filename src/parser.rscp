@@ -207,6 +207,7 @@ impl Parser {
                 Ok(s)
             }
             Fn => self.fn_statement(),
+            Class => self.class_statement(),
             If => self.if_statement(),
             While => self.while_statement(),
             Loop => self.loop_statement(),
@@ -250,6 +251,50 @@ impl Parser {
                 name: name.lexeme.clone(),
                 func,
             },
+            kw.line,
+            kw.col,
+        ))
+    }
+
+    /// `class Name(Parent) { fn init(...) { } fn method(...) { } }`.
+    /// A class body holds only `fn` methods; `self` is injected by the
+    /// compiler, so methods never list it in their parameters.
+    fn class_statement(&mut self) -> PResult<Stmt> {
+        let kw = self.advance(); // class
+        let name = self.expect(TokenType::Ident, "a class name after 'class'")?;
+        let parent = if self.match_ty(TokenType::LParen).is_some() {
+            let p = self.expect(TokenType::Ident, "a parent class name")?;
+            self.expect(TokenType::RParen, "')' after the parent class name")?;
+            Some(p.lexeme.clone())
+        } else {
+            None
+        };
+        if !self.check(TokenType::LBrace) {
+            return Err(self.error_here("'{' to open the class body"));
+        }
+        self.advance(); // {
+        let mut methods: Vec<(String, FuncLit)> = Vec::new();
+        loop {
+            if self.check(TokenType::RBrace) {
+                break;
+            }
+            if self.at_eof() {
+                return Err(self.error_here("unterminated class body: expected '}'"));
+            }
+            if self.match_ty(TokenType::Semicolon).is_some() {
+                continue; // empty statement
+            }
+            self.expect(TokenType::Fn, "'fn' (a class body holds only methods)")?;
+            let mname = self.expect(TokenType::Ident, "a method name after 'fn'")?;
+            if methods.iter().any(|(n, _)| n == &mname.lexeme) {
+                return Err(self.error_at(&mname, format!("duplicate method '{}'", mname.lexeme)));
+            }
+            let func = self.func_body()?;
+            methods.push((mname.lexeme.clone(), func));
+        }
+        self.advance(); // }
+        Ok(Stmt::new(
+            StmtKind::Class { name: name.lexeme.clone(), parent, methods },
             kw.line,
             kw.col,
         ))
@@ -880,6 +925,7 @@ impl Parser {
                 TokenType::Le => BinaryOp::Le,
                 TokenType::Gt => BinaryOp::Gt,
                 TokenType::Ge => BinaryOp::Ge,
+                TokenType::InstanceOf => BinaryOp::InstanceOf,
                 _ => return Ok(lhs),
             };
             let tok = self.advance();
@@ -1237,6 +1283,20 @@ impl Parser {
                 self.advance();
                 let func = self.func_body()?;
                 Ok(Expr::new(ExprKind::Func(Box::new(func)), line, col))
+            }
+            // `self` is an ordinary local: the compiler injects it as
+            // parameter 0 of every method.
+            SelfKw => {
+                self.advance();
+                Ok(Expr::new(ExprKind::Ident("self".to_string()), line, col))
+            }
+            // Only `super.name(...)` calls exist; the compiler special-cases
+            // them where the call is built.
+            Super => {
+                self.advance();
+                self.expect(TokenType::Dot, "'.' after 'super'")?;
+                let name = self.expect(TokenType::Ident, "a method name after 'super.'")?;
+                Ok(Expr::new(ExprKind::Super(name.lexeme.clone()), line, col))
             }
             // Short closures: `|x| expr`, `|x, y| expr`, `|x| { ... }`, `|| expr`.
             Pipe => self.short_closure(),
@@ -1835,6 +1895,34 @@ fn f(
         let stmts = parse("if not done { break }");
         assert!(matches!(&stmts[0].kind, StmtKind::If { cond, .. }
             if matches!(cond.kind, ExprKind::Unary { op: UnaryOp::Not, .. })));
+    }
+
+    #[test]
+    fn class_shapes() {
+        let stmts = parse(
+            "class Animal {\n    fn init(name) { self.name = name }\n    fn speak() -> \"...\"\n}\nclass Dog(Animal) { fn speak() -> \"Woof\" }",
+        );
+        match &stmts[0].kind {
+            StmtKind::Class { name, parent, methods } => {
+                assert_eq!(name, "Animal");
+                assert!(parent.is_none());
+                assert_eq!(methods.len(), 2);
+                assert_eq!(methods[0].0, "init");
+                assert_eq!(methods[0].1.params, vec!["name"]); // no self listed
+            }
+            other => panic!("bad stmt: {other:?}"),
+        }
+        match &stmts[1].kind {
+            StmtKind::Class { parent, .. } => assert_eq!(parent.as_deref(), Some("Animal")),
+            other => panic!("bad stmt: {other:?}"),
+        }
+        // instanceof parses at comparison level, under and/or/not.
+        let stmts = parse("let ok = d instanceof Dog and x < 3");
+        assert!(matches!(&stmts[0].kind, StmtKind::Let { init, .. }
+            if matches!(init.kind, ExprKind::Logical { op: LogicalOp::And, .. })));
+        // A class body without methods is an error, as is a stray super.
+        assert!(matches!(parse_err("class X { let y = 1 }"), RscpError::Parse { .. }));
+        assert!(matches!(parse_err("super"), RscpError::Parse { .. }));
     }
 
     #[test]

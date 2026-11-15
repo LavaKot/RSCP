@@ -397,6 +397,55 @@ impl Compiler {
                     self.declare_local(name, false, s.line, s.col)?;
                 }
             }
+            StmtKind::Class { name, parent, methods } => {
+                // A class object is a plain map built right in bytecode:
+                //   {"__name__": <str>, "__isclass__": true,
+                //    "__parent__": <class map or null>, <method>: <closure>}
+                // Methods get `self` injected as parameter 0.
+                if 3 + methods.len() > u16::MAX as usize {
+                    return Err(self.err("class has too many members", s.line, s.col));
+                }
+                let k = self.string_const("__name__", s.line, s.col)?;
+                self.emit_u16(Op::Constant, k, s.line, s.col);
+                let v = self.string_const(name, s.line, s.col)?;
+                self.emit_u16(Op::Constant, v, s.line, s.col);
+                let k = self.string_const("__isclass__", s.line, s.col)?;
+                self.emit_u16(Op::Constant, k, s.line, s.col);
+                self.emit(Op::True, s.line, s.col);
+                let k = self.string_const("__parent__", s.line, s.col)?;
+                self.emit_u16(Op::Constant, k, s.line, s.col);
+                match parent {
+                    Some(p) => {
+                        let gi = self.string_const(p, s.line, s.col)?;
+                        self.emit_u16(Op::GetGlobal, gi, s.line, s.col);
+                    }
+                    None => {
+                        self.emit(Op::Null, s.line, s.col);
+                    }
+                }
+                for (mname, m) in methods {
+                    let ki = self.string_const(mname, s.line, s.col)?;
+                    self.emit_u16(Op::Constant, ki, s.line, s.col);
+                    let mut lit = m.clone();
+                    lit.params.insert(0, "self".to_string());
+                    let ci = self.function(&lit, Some(mname))?;
+                    self.emit_closure(ci, s.line, s.col)?;
+                }
+                self.emit_u16(Op::Map, (3 + methods.len()) as u16, s.line, s.col);
+                self.push_temp();
+                if self.at_top_level() {
+                    if self.top_names.iter().any(|n| n == name) {
+                        return Err(self.err(format!("'{name}' is already defined at the top level"), s.line, s.col));
+                    }
+                    self.top_names.push(name.clone());
+                    let gi = self.string_const(name, s.line, s.col)?;
+                    self.emit_u16(Op::DefineGlobalConst, gi, s.line, s.col);
+                    self.drop_temps(1);
+                } else {
+                    // Class bindings are immutable, like fn bindings.
+                    self.declare_local(name, false, s.line, s.col)?;
+                }
+            }
             StmtKind::Assign { target, op, value } => {
                 self.assign(target, op.binary(), Some(value), s.line, s.col)?;
             }
@@ -1042,6 +1091,38 @@ impl Compiler {
                 if args.len() > u8::MAX as usize {
                     return Err(self.err(format!("too many arguments in a call (max is {})", u8::MAX), e.line, e.col));
                 }
+                // super.name(args) — the parent's method with self bound.
+                if let ExprKind::Super(name) = &callee.kind {
+                    let ni = self.string_const(name, e.line, e.col)?;
+                    self.emit_u16(Op::SuperMethod, ni, e.line, e.col);
+                    self.push_temp();
+                    let this = Expr::new(ExprKind::Ident("self".to_string()), e.line, e.col);
+                    self.expr(&this)?;
+                    for a in args {
+                        self.expr(a)?;
+                    }
+                    self.emit_u8(Op::Call, (args.len() + 1) as u8, e.line, e.col);
+                    self.drop_temps(args.len() + 2);
+                    self.push_temp();
+                    return Ok(());
+                }
+                // obj.key(args) — a method call (self gets bound for
+                // instances; a plain map's stored function stays unbound).
+                if let ExprKind::Index { obj, idx } = &callee.kind {
+                    if let ExprKind::Str(key) = &idx.kind {
+                        self.expr(obj)?;
+                        let ki = self.string_const(key, e.line, e.col)?;
+                        self.emit_u16(Op::Constant, ki, e.line, e.col);
+                        self.push_temp();
+                        for a in args {
+                            self.expr(a)?;
+                        }
+                        self.emit_u8(Op::CallMethod, args.len() as u8, e.line, e.col);
+                        self.drop_temps(args.len() + 2);
+                        self.push_temp();
+                        return Ok(());
+                    }
+                }
                 self.expr(callee)?;
                 for a in args {
                     self.expr(a)?;
@@ -1068,6 +1149,13 @@ impl Compiler {
                 }
                 self.emit(Op::SliceGet, e.line, e.col);
                 self.drop_temps(3);
+            }
+            ExprKind::Super(name) => {
+                return Err(self.err(
+                    format!("super.{name}(...) can only be used as a call inside a method"),
+                    e.line,
+                    e.col,
+                ));
             }
             ExprKind::Range { .. } => {
                 return Err(self.err(
@@ -1116,6 +1204,7 @@ impl Compiler {
             BinaryOp::Div => Op::Div,
             BinaryOp::Mod => Op::Mod,
             BinaryOp::Pow => Op::Pow,
+            BinaryOp::InstanceOf => Op::InstanceOf,
             BinaryOp::BitAnd => Op::BitAnd,
             BinaryOp::BitOr => Op::BitOr,
             BinaryOp::BitXor => Op::BitXor,

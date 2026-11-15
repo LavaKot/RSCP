@@ -60,7 +60,7 @@ rscp update                        # self-update from GitHub (Windows)
 
 ```
 $ rscp repl
-rscp 2026.5.6.0 — enter statements, Ctrl-D to exit.
+rscp 2026.6.0.0 — enter statements, Ctrl-D to exit.
 rscp> let double = |x| x * 2
 rscp> double(21)
 42
@@ -109,7 +109,7 @@ rscp.exe hello.rscp    # Windows
 Editor support ships in [`editors/`](editors/README.md), for every editor:
 
 * **VS Code / VSCodium / Cursor** — a real extension, packaged and ready:
-  `code --install-extension editors/vscode/rscp-2026.5.6.0.vsix`
+  `code --install-extension editors/vscode/rscp-2026.6.0.0.vsix`
   (highlighting, 16 snippets, brackets, auto-indent; see
   [`editors/vscode/README.md`](editors/vscode/README.md), на русском).
 * **Vim / Neovim** — `editors/vim/` (syntax + detection, tested).
@@ -381,6 +381,37 @@ but a module function reaching for a module-level `var` by name after the
 import is done sees the importer's globals, so keep mutable state inside
 closures (`fn make_counter() { … }`) like in `examples/modules.rscp`.
 
+### Classes (2026.6.0)
+
+`class Name(Parent) { ... }` defines a class; the body holds `fn` methods.
+`Name(args)` constructs an instance (calling `init` with `self` bound),
+`self.x` reads and writes fields, `obj.method()` dispatches up the
+inheritance chain, `super.method()` calls the parent implementation, and
+`obj instanceof Class` tests the chain:
+
+```rust
+class Animal {
+    fn init(name) { self.name = name }
+    fn speak() -> "..."
+    fn describe() -> f"{self.name} says {self.speak()}"
+}
+class Dog(Animal) {
+    fn speak() -> "Woof"
+}
+let d = Dog("Rex")
+println(d.describe())                   # Rex says Woof
+println(d instanceof Animal, type(d))   # true Dog
+```
+
+Methods never list `self` in their parameters — the compiler injects it as
+parameter 0. Overriding `init` replaces the parent's entirely; call the
+parent yourself with `super.init(...)`. Instances print as
+`<Dog instance>` and `type(instance)` returns the class name. Under the
+hood a class is an immutable map (`{"__name__": ..., "__isclass__": true,
+"__parent__": ..., methods}`) and an instance is a map holding a
+`__class__` reference — so `keys()`, `has()` and map iteration work on
+them, and classes compose with everything else in the language.
+
 ### Errors: `try` / `catch` / `throw`
 
 Runtime errors are values you can catch: division by zero, out-of-bounds
@@ -599,6 +630,8 @@ statement      := letStmt | fnStmt | ifStmt | whileStmt | loopStmt | forStmt
 
 letStmt        := ("let" | "var") IDENT "=" expression [";"] ;
 fnStmt         := "fn" IDENT funcBody ;
+classStmt      := "class" IDENT [ "(" IDENT ")" ]
+                  "{" { "fn" IDENT funcBody } "}" ;
 funcBody       := "(" [ paramList ] ")" ( block | "->" expression ) ;
 paramList      := IDENT { "," IDENT } [ "," ] ;   (* trailing comma ok *)
 
@@ -719,7 +752,7 @@ source (.rscp) ──► lexer ──► parser ──► compiler ──► byt
 | `src/parser.rscp` | recursive descent + precedence climbing |
 | `src/fmt.rscp`   | `rscp fmt` — token-level formatter |
 | `src/errors.rscp` | unified error type, source-annotated rendering |
-| `src/bytecode.rscp` | 54 opcodes, chunks, prototypes, disassembler |
+| `src/bytecode.rscp` | 57 opcodes, chunks, prototypes, disassembler |
 | `src/compiler.rscp` | AST → bytecode; locals, upvalue capture, loop patching |
 | `src/value.rscp`  | runtime values (`Rc`/`RefCell` reference types) |
 | `src/vm.rscp`     | stack machine: frames, call stack, upvalue closing |
@@ -729,7 +762,7 @@ source (.rscp) ──► lexer ──► parser ──► compiler ──► byt
 Design highlights:
 
 * **Bytecode, not tree-walking.** Programs compile once into a `Chunk` of
-  54 one-byte opcodes (with `u8`/`u16` operands); the VM is a tight dispatch
+  57 one-byte opcodes (with `u8`/`u16` operands); the VM is a tight dispatch
   loop over call frames. `for i in 0..n` compiles to a counted loop — no
   array is built (same speed as the legacy C-style `for`), and `match`
   compiles to a jump chain — no allocations.
@@ -764,14 +797,14 @@ Design highlights:
 cargo test
 ```
 
-* **63 unit tests** across lexer (including the semicolon-insertion rules),
+* **64 unit tests** across lexer (including the semicolon-insertion rules),
   parser (both syntax styles), compiler and VM (including closure
   semantics, mutability rules and error cases).
-* **105 golden cases** in `tests/cases/`: each program's exact stdout is
+* **106 golden cases** in `tests/cases/`: each program's exact stdout is
   pinned in a `.out` file; error programs pin the exit code and a required
   stderr fragment in `.err` files. The suite spans every feature and every
   error class in this README, both the light and the legacy syntax.
-* **10 showcase examples** are smoke-tested (`examples/`).
+* **12 showcase examples** are smoke-tested (`examples/`).
 * The CLI surface itself is tested (exit codes, subcommands).
 
 ---
@@ -790,6 +823,7 @@ cargo test
 | infinite loop | `while True:` | `loop { }` | `loop { }` |
 | slices | `a[1:3]`, `a[::-1]` | `&a[1..3]` | `a[1:3]`, `a[::-1]` |
 | branching | `match` (3.10+) | `match` | `match` (expression, with guards and ranges) |
+| classes | `class A:` | `struct` + `impl` | `class A(Parent) { fn ... }` |
 | bitwise | `\| & ^ << >>` | `\| & ^ ! << >>` | `\| & ^ ~ << >>` (Rust precedence) |
 | types | dynamic | static, inferred | dynamic |
 | memory | GC | ownership | refcounted `Rc` values |
@@ -813,13 +847,22 @@ last number (`2026.2.1.1`), and the next year starts over at `2027.1.0.0`.
 
 A tooling note: Cargo and npm manifests only accept three-number semver, so
 `Cargo.toml` and the VS Code `package.json` carry the first three numbers
-(`2026.5.6` in this release). The full four-number version lives in
-`rscp version`, the REPL banner, release tags (`v2026.5.6.0`), release
+(`2026.6.0` in this release). The full four-number version lives in
+`rscp version`, the REPL banner, release tags (`v2026.6.0.0`), release
 file names and this README. Every release is published on GitHub as a tag
 with the source zip, the Windows zip and the `.vsix` attached.
 
 ## Changelog
 
+* **2026.6.0.0** — object-oriented programming. `class Name(Parent) { fn
+  method(...) { } }` with constructor calls `Name(args)`, `init` methods,
+  an injected `self`, field access `self.x`, method dispatch up the
+  inheritance chain, `super.method(...)`, `instanceof`, `type(instance)`
+  returning the class name and `<Dog instance>` printing. Classes are
+  immutable maps under the hood and instances are maps with a `__class__`
+  reference — no new value type, everything composes. New opcodes
+  `CallMethod` / `SuperMethod` / `InstanceOf`. 64 unit tests, 106 golden
+  cases, new `examples/oop.rscp`.
 * **2026.5.6.0** — readability. `rscp fmt` — a conservative, comment-
   preserving formatter (one statement per line, 4-space indentation,
   canonical spacing; `-w` rewrites in place, output always parses to the

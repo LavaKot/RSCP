@@ -1,4 +1,4 @@
-" Vim syntax file for RSCP 2026.5.6.0
+" Vim syntax file for RSCP 2026.6.0.0
 " Place in ~/.vim/syntax/rscp.vim (or ~/.config/nvim/syntax/rscp.vim),
 " together with the ftdetect rule from editors/vim/ftdetect/rscp.vim.
 
@@ -10,8 +10,8 @@ endif
 syntax keyword rscpConditional if else match
 syntax keyword rscpRepeat while loop for in
 syntax keyword rscpStatement return break continue try catch throw import as import as
-syntax keyword rscpKeyword fn let var
-syntax keyword rscpOperator and or not
+syntax keyword rscpKeyword fn let var class self super
+syntax keyword rscpOperator and or not instanceof
 syntax keyword rscpBoolean true false
 syntax keyword rscpConstant null
 
